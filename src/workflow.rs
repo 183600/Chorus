@@ -33,7 +33,6 @@ struct SelectedChoice {
     worker_name: String,
     response: String,
     reasoning: Option<String>,
-    raw_output: String,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +122,7 @@ impl WorkflowEngine {
             .await
     }
 
+    #[allow(dead_code)]
     pub async fn process_with_details(&self, prompt: String) -> Result<WorkflowResult> {
         self.run_plan_with_details(&self.config.workflow_integration, &prompt, 0, None)
             .await
@@ -974,7 +974,6 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                     worker_name,
                     response: worker_response,
                     reasoning,
-                    raw_output,
                 };
 
                 (details, Some(choice))
