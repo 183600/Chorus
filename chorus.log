@@ -1,6 +1,17 @@
-[2m2025-12-01T09:44:05.939878Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Chorus LLM API Aggregation Service starting
-[2m2025-12-01T09:44:05.940139Z[0m [32m INFO[0m [2mchorus::config[0m[2m:[0m Loading configuration from: /home/qwe12345678/github/chorus/test-config.toml
-[2m2025-12-01T09:44:05.940934Z[0m [34mDEBUG[0m [2mchorus::config[0m[2m:[0m Workflow validation passed
-[2m2025-12-01T09:44:05.940975Z[0m [34mDEBUG[0m [2mchorus::config[0m[2m:[0m Configuration loaded successfully: Config { server: ServerConfig { host: "127.0.0.1", port: 11435 }, model: [ModelConfig { name: "test-model", api_base: "http://localhost:11434", api_key: "ollama", auto_temperature: true, temperature: None }], workflow_integration: WorkflowIntegrationConfig { nested_worker_depth: 1, json: "{\n  \"analyzer\": {\"ref\": \"test-model\"},\n  \"workers\": [\n    {\"ref\": \"test-model\", \"temperature\": 1.4}\n  ],\n  \"selector\": {\"ref\": \"test-model\"},\n  \"synthesizer\": {\"ref\": \"test-model\"}\n}\n" }, workflow: WorkflowConfig { timeouts: WorkflowTimeouts { analyzer_timeout_secs: 30, worker_timeout_secs: 60, synthesizer_timeout_secs: 60 }, domains: {} } }
-[2m2025-12-01T09:44:05.941023Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Binding to 127.0.0.1:11435
-Error: Os { code: 98, kind: AddrInUse, message: "Address already in use" }
+[2m2025-12-21T16:04:23.899971Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Starting Chorus server on 127.0.0.1:11435
+[2m2025-12-21T16:04:23.900112Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Analyzer model: test-model
+[2m2025-12-21T16:04:23.900115Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Worker nodes: ["test-model"]
+[2m2025-12-21T16:04:23.900117Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Synthesizer model: test-model
+[2m2025-12-21T16:04:23.900388Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Chorus server listening on http://127.0.0.1:11435
+[2m2025-12-21T16:04:24.922354Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2025-12-21T16:04:24.922382Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2025-12-21T16:04:24.922472Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Auto temperature enabled for analyzer test-model at depth 0, analyzing prompt
+[2m2025-12-21T16:04:25.119741Z[0m [31mERROR[0m [2mchorus::server[0m[2m:[0m Application error [3mstatus[0m[2m=[0m500 Internal Server Error [3merror[0m[2m=[0mLLM API request failed with status 401 Unauthorized: {
+  "error": {
+    "message": "Incorrect API key provided: sk-test-**************tion. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  },
+  "status": 401
+}
