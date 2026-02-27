@@ -1,0 +1,5 @@
+[2m2025-12-22T13:51:19.142288Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Starting Chorus server on 127.0.0.1:11435
+[2m2025-12-22T13:51:19.142437Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Analyzer model: glm-4.6
+[2m2025-12-22T13:51:19.142440Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Worker nodes: ["glm-4.6"]
+[2m2025-12-22T13:51:19.142442Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Synthesizer model: glm-4.6
+[2m2025-12-22T13:51:19.142664Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Chorus server listening on http://127.0.0.1:11435
