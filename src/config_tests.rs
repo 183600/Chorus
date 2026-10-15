@@ -1422,4 +1422,107 @@ synthesizer_timeout_secs = 90
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn retry_config_defaults_when_section_missing() {
+        let cfg: Config = toml::from_str(CFG_LEGACY).unwrap();
+
+        assert_eq!(
+            cfg.workflow.retry.max_retries,
+            crate::config::DEFAULT_RETRY_MAX_RETRIES
+        );
+        assert_eq!(
+            cfg.workflow.retry.initial_backoff_ms,
+            crate::config::DEFAULT_RETRY_INITIAL_BACKOFF_MS
+        );
+        assert_eq!(
+            cfg.workflow.retry.max_backoff_ms,
+            crate::config::DEFAULT_RETRY_MAX_BACKOFF_MS
+        );
+
+        let policy = cfg.workflow.retry.to_retry_policy();
+        assert_eq!(policy.max_retries, crate::config::DEFAULT_RETRY_MAX_RETRIES);
+        assert_eq!(
+            policy.initial_backoff,
+            std::time::Duration::from_millis(crate::config::DEFAULT_RETRY_INITIAL_BACKOFF_MS)
+        );
+        assert_eq!(
+            policy.max_backoff,
+            std::time::Duration::from_millis(crate::config::DEFAULT_RETRY_MAX_BACKOFF_MS)
+        );
+    }
+
+    #[test]
+    fn retry_config_parses_explicit_and_partial_values() {
+        const CFG_EXPLICIT: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+json = """{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"}
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 3
+worker_timeout_secs = 6
+synthesizer_timeout_secs = 9
+
+[workflow.retry]
+max_retries = 5
+initial_backoff_ms = 100
+max_backoff_ms = 2000
+"#;
+
+        let cfg: Config = toml::from_str(CFG_EXPLICIT).unwrap();
+        assert_eq!(cfg.workflow.retry.max_retries, 5);
+        assert_eq!(cfg.workflow.retry.initial_backoff_ms, 100);
+        assert_eq!(cfg.workflow.retry.max_backoff_ms, 2000);
+
+        const CFG_PARTIAL: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+json = """{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"}
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 3
+worker_timeout_secs = 6
+synthesizer_timeout_secs = 9
+
+[workflow.retry]
+max_retries = 0
+"#;
+
+        let cfg: Config = toml::from_str(CFG_PARTIAL).unwrap();
+        assert_eq!(cfg.workflow.retry.max_retries, 0);
+        assert_eq!(
+            cfg.workflow.retry.initial_backoff_ms,
+            crate::config::DEFAULT_RETRY_INITIAL_BACKOFF_MS
+        );
+        assert_eq!(
+            cfg.workflow.retry.max_backoff_ms,
+            crate::config::DEFAULT_RETRY_MAX_BACKOFF_MS
+        );
+        assert_eq!(cfg.workflow.retry.to_retry_policy().max_retries, 0);
+    }
 }

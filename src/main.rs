@@ -33,6 +33,12 @@ async fn main() -> Result<()> {
         "Analyzer model: {}",
         config.workflow_integration.analyzer.model
     );
+    tracing::info!(
+        "Retry policy: max_retries={}, initial_backoff={}ms, max_backoff={}ms",
+        config.workflow.retry.max_retries,
+        config.workflow.retry.initial_backoff_ms,
+        config.workflow.retry.max_backoff_ms
+    );
     if tracing::enabled!(tracing::Level::INFO) {
         tracing::info!("Worker nodes: {:?}", config.workflow_integration.worker_labels());
     }

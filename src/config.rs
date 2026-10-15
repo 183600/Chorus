@@ -572,6 +572,58 @@ pub struct WorkflowConfig {
     pub domains: HashMap<String, DomainTimeoutOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_concurrency: Option<usize>,
+    #[serde(default)]
+    pub retry: RetryConfig,
+}
+
+pub const DEFAULT_RETRY_MAX_RETRIES: u32 = 2;
+pub const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 500;
+pub const DEFAULT_RETRY_MAX_BACKOFF_MS: u64 = 8_000;
+
+fn default_retry_max_retries() -> u32 {
+    DEFAULT_RETRY_MAX_RETRIES
+}
+
+fn default_retry_initial_backoff_ms() -> u64 {
+    DEFAULT_RETRY_INITIAL_BACKOFF_MS
+}
+
+fn default_retry_max_backoff_ms() -> u64 {
+    DEFAULT_RETRY_MAX_BACKOFF_MS
+}
+
+/// Automatic retry policy for transient upstream LLM failures.
+///
+/// The section is optional; when omitted (or partially specified) the values
+/// above are used. Set `max_retries = 0` to disable retries entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    #[serde(default = "default_retry_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_retry_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    #[serde(default = "default_retry_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: DEFAULT_RETRY_MAX_RETRIES,
+            initial_backoff_ms: DEFAULT_RETRY_INITIAL_BACKOFF_MS,
+            max_backoff_ms: DEFAULT_RETRY_MAX_BACKOFF_MS,
+        }
+    }
+}
+
+impl RetryConfig {
+    pub fn to_retry_policy(&self) -> crate::llm::RetryPolicy {
+        crate::llm::RetryPolicy::new(
+            self.max_retries,
+            std::time::Duration::from_millis(self.initial_backoff_ms),
+            std::time::Duration::from_millis(self.max_backoff_ms),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

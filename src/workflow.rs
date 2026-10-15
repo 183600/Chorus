@@ -1,5 +1,5 @@
 use crate::config::{Config, ModelConfig, WorkflowModelTarget, WorkflowPlan, WorkflowWorker};
-use crate::llm::{parse_temperature_from_response, ChatMessage, LLMClient};
+use crate::llm::{parse_temperature_from_response, ChatMessage, LLMClient, RetryPolicy};
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use futures::stream::{self, StreamExt as _};
@@ -134,6 +134,7 @@ pub struct WorkflowEngine {
     model_configs: HashMap<String, usize>,
     api_timeouts: HashMap<String, crate::config::TimeoutConfig>,
     llm_clients: RwLock<Vec<(LlmClientCacheKey, Arc<LLMClient>)>>,
+    retry_policy: RetryPolicy,
 }
 
 impl WorkflowEngine {
@@ -151,11 +152,13 @@ impl WorkflowEngine {
                 .entry(model.api_base.clone())
                 .or_insert_with(|| Self::resolve_timeouts(&config, &model.api_base));
         }
+        let retry_policy = config.workflow.retry.to_retry_policy();
         Self {
             config,
             model_configs,
             api_timeouts,
             llm_clients: RwLock::new(Vec::new()),
+            retry_policy,
         }
     }
 
@@ -224,10 +227,11 @@ impl WorkflowEngine {
             }
         }
 
-        let new_client = Arc::new(LLMClient::new(
+        let new_client = Arc::new(LLMClient::new_with_retry(
             api_base.to_string(),
             api_key.to_string(),
             timeout_secs,
+            self.retry_policy,
         )?);
 
         let mut clients = self.llm_clients.write().await;
@@ -1543,8 +1547,8 @@ fn parse_candidate_index(fragment: &str, worker_count: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::config::{
-        Config, ModelConfig, ServerConfig, TimeoutConfig, WorkflowConfig, WorkflowModelTarget,
-        WorkflowPlan, WorkflowWorker,
+        Config, ModelConfig, RetryConfig, ServerConfig, TimeoutConfig, WorkflowConfig,
+        WorkflowModelTarget, WorkflowPlan, WorkflowWorker,
     };
     use axum::{extract::State, routing::post, Json, Router};
     use serde_json::{json, Value};
@@ -1590,6 +1594,7 @@ mod tests {
                 },
                 domains: HashMap::new(),
                 worker_concurrency: None,
+                retry: RetryConfig::default(),
             },
         }
     }
@@ -1993,6 +1998,7 @@ mod tests {
                 },
                 domains: HashMap::new(),
                 worker_concurrency: concurrency,
+                retry: RetryConfig::default(),
             },
         }
     }
@@ -2091,6 +2097,84 @@ mod tests {
             probe.max_active.load(Ordering::SeqCst),
             1,
             "concurrency limit of one must not overlap worker calls"
+        );
+    }
+
+    struct FlakyProbe {
+        calls: AtomicUsize,
+    }
+
+    async fn flaky_handler(
+        State(probe): State<Arc<FlakyProbe>>,
+        Json(body): Json<Value>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let call = probe.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily overloaded",
+            )
+                .into_response()
+        } else {
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            Json(json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": format!("echo:{}", model)},
+                    "finish_reason": "stop"
+                }]
+            }))
+            .into_response()
+        }
+    }
+
+    #[tokio::test]
+    async fn workers_recover_from_transient_failures() {
+        let probe = Arc::new(FlakyProbe {
+            calls: AtomicUsize::new(0),
+        });
+        let app = Router::new()
+            .route("/v1/chat/completions", post(flaky_handler))
+            .with_state(Arc::clone(&probe));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut config = build_network_test_config(
+            &format!("http://127.0.0.1:{}/v1", port),
+            &["alpha"],
+            None,
+        );
+        config.workflow.retry = RetryConfig {
+            max_retries: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 5,
+        };
+        let engine = WorkflowEngine::new(config);
+
+        let details = engine
+            .run_workers_with_details(&engine.config.workflow_integration, "ping", 1.0, false, 0)
+            .await
+            .expect("a transient 503 must be retried and eventually succeed");
+
+        assert_eq!(details.len(), 1);
+        assert!(
+            details[0].success,
+            "worker should succeed after retry, error: {:?}",
+            details[0].error
+        );
+        assert_eq!(details[0].response.as_deref(), Some("echo:alpha"));
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            2,
+            "expected one failed attempt plus one successful retry"
         );
     }
 }

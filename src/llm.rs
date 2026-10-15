@@ -53,16 +53,77 @@ struct ChatCompletionRequest<'a> {
     temperature: Option<f64>,
 }
 
+/// Policy controlling automatic retries for transient upstream failures.
+///
+/// Retries only apply to failures that happen before any response content has
+/// been consumed: connection/timeout errors, HTTP 408/429/5xx responses and
+/// response body read failures. Once tokens have been forwarded to a caller
+/// (streaming), the request is never retried so partial output cannot be
+/// duplicated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    pub max_retries: u32,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl RetryPolicy {
+    pub const fn disabled() -> Self {
+        Self {
+            max_retries: 0,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        }
+    }
+
+    pub const fn new(max_retries: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
+        Self {
+            max_retries,
+            initial_backoff,
+            max_backoff,
+        }
+    }
+
+    /// Exponential backoff for the n-th retry (1-based), capped at `max_backoff`.
+    pub fn backoff_for_retry(&self, retry_number: u32) -> Duration {
+        let exponent = retry_number.saturating_sub(1).min(16);
+        let factor = 1u32 << exponent;
+        self.initial_backoff
+            .saturating_mul(factor)
+            .min(self.max_backoff)
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(8),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LLMClient {
     client: Client,
     api_base: String,
     authorization: String,
     chat_completions_url: String,
+    retry: RetryPolicy,
 }
 
 impl LLMClient {
     pub fn new(api_base: String, api_key: String, timeout_secs: u64) -> Result<Self> {
+        Self::new_with_retry(api_base, api_key, timeout_secs, RetryPolicy::disabled())
+    }
+
+    pub fn new_with_retry(
+        api_base: String,
+        api_key: String,
+        timeout_secs: u64,
+        retry: RetryPolicy,
+    ) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
@@ -76,6 +137,7 @@ impl LLMClient {
             api_base,
             authorization: format!("Bearer {}", api_key),
             chat_completions_url,
+            retry,
         })
     }
 
@@ -115,51 +177,119 @@ impl LLMClient {
             tracing::debug!("Request body: {}", serde_json::to_string_pretty(&request)?);
         }
 
-        let response = self
-            .client
-            .post(&self.chat_completions_url)
-            .header("Authorization", &self.authorization)
-            .json(&request)
-            .send()
-            .await?;
+        let body = serde_json::to_vec(&request)?;
+        let mut attempt: u32 = 0;
 
-        if !response.status().is_success() {
+        loop {
+            attempt += 1;
+
+            let response = match self
+                .client
+                .post(&self.chat_completions_url)
+                .header("Authorization", &self.authorization)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    if self.can_retry(attempt) && is_retryable_reqwest_error(&err) {
+                        self.wait_before_retry(attempt, None, model, &err.to_string())
+                            .await;
+                        continue;
+                    }
+                    return Err(err.into());
+                }
+            };
+
             let status = response.status();
-            let error_text = response.text().await?;
-            return Err(anyhow!(
-                "LLM API request failed with status {}: {}",
-                status,
-                error_text
-            ));
-        }
+            if !status.is_success() {
+                let retry_after = parse_retry_after(response.headers());
+                let error_text = response.text().await;
 
-        if stream_was_requested && response_is_event_stream(&response) {
-            return self.consume_event_stream(response, stream).await;
-        }
+                if self.can_retry(attempt) && is_retryable_status(status) {
+                    let error_text = error_text.unwrap_or_default();
+                    self.wait_before_retry(
+                        attempt,
+                        retry_after,
+                        model,
+                        &format!("HTTP {}: {}", status, error_text),
+                    )
+                    .await;
+                    continue;
+                }
 
-        // Be tolerant to different provider response shapes
-        let v: serde_json::Value = response.json().await?;
-
-        if let Some(content) = extract_completion_text(&v) {
-            if let Some(sender) = stream.as_ref() {
-                let _ = sender.send(content.clone());
+                let error_text = error_text?;
+                return Err(anyhow!(
+                    "LLM API request failed with status {}: {}",
+                    status,
+                    error_text
+                ));
             }
-            return Ok(CompletionResult {
-                content,
-                streamed: stream_was_requested,
-            });
-        }
 
-        if let Some(err_msg) = detect_provider_error(&v) {
-            return Err(anyhow!(
-                "LLM provider {} (model {}) returned error: {}",
-                self.api_base,
-                model,
-                err_msg
-            ));
-        }
+            if stream_was_requested && response_is_event_stream(&response) {
+                return self.consume_event_stream(response, stream).await;
+            }
 
-        Err(anyhow!("LLM response missing content field: {}", v))
+            // Be tolerant to different provider response shapes
+            let v: serde_json::Value = match response.json().await {
+                Ok(value) => value,
+                Err(err) => {
+                    if self.can_retry(attempt) && is_retryable_reqwest_error(&err) {
+                        self.wait_before_retry(attempt, None, model, &err.to_string())
+                            .await;
+                        continue;
+                    }
+                    return Err(err.into());
+                }
+            };
+
+            if let Some(content) = extract_completion_text(&v) {
+                if let Some(sender) = stream.as_ref() {
+                    let _ = sender.send(content.clone());
+                }
+                return Ok(CompletionResult {
+                    content,
+                    streamed: stream_was_requested,
+                });
+            }
+
+            if let Some(err_msg) = detect_provider_error(&v) {
+                return Err(anyhow!(
+                    "LLM provider {} (model {}) returned error: {}",
+                    self.api_base,
+                    model,
+                    err_msg
+                ));
+            }
+
+            return Err(anyhow!("LLM response missing content field: {}", v));
+        }
+    }
+
+    fn can_retry(&self, attempt: u32) -> bool {
+        attempt <= self.retry.max_retries
+    }
+
+    async fn wait_before_retry(
+        &self,
+        attempt: u32,
+        retry_after: Option<Duration>,
+        model: &str,
+        reason: &str,
+    ) {
+        let delay = retry_delay(&self.retry, attempt, retry_after);
+        tracing::warn!(
+            url = %self.chat_completions_url,
+            model,
+            attempt,
+            max_retries = self.retry.max_retries,
+            delay_ms = delay.as_millis() as u64,
+            reason,
+            "Transient LLM API failure, retrying"
+        );
+        tokio::time::sleep(delay).await;
     }
 
     async fn consume_event_stream(
@@ -279,6 +409,36 @@ fn response_is_event_stream(response: &reqwest::Response) -> bool {
         .and_then(|value| value.to_str().ok())
         .map(|content_type| content_type.contains("text/event-stream"))
         .unwrap_or(false)
+}
+
+fn retry_delay(policy: &RetryPolicy, attempt: u32, retry_after: Option<Duration>) -> Duration {
+    let delay = retry_after.unwrap_or_else(|| policy.backoff_for_retry(attempt));
+    delay.min(policy.max_backoff)
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
+    if err.is_builder() || err.is_redirect() || err.is_decode() {
+        return false;
+    }
+    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
+}
+
+/// Reads the numeric form of a `Retry-After` header (seconds). HTTP-date
+/// values are ignored so a misconfigured provider cannot block a request
+/// indefinitely.
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 fn append_valid_utf8(pending: &mut Vec<u8>, out: &mut String) {
@@ -1010,6 +1170,258 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "content must be delivered exactly once"
+        );
+    }
+
+    #[test]
+    fn retry_policy_backoff_is_exponential_and_capped() {
+        let policy = RetryPolicy::new(3, Duration::from_millis(100), Duration::from_millis(250));
+        assert_eq!(policy.backoff_for_retry(1), Duration::from_millis(100));
+        assert_eq!(policy.backoff_for_retry(2), Duration::from_millis(200));
+        assert_eq!(policy.backoff_for_retry(3), Duration::from_millis(250));
+        assert_eq!(policy.backoff_for_retry(10), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn retry_delay_prefers_retry_after_and_is_capped() {
+        let policy = RetryPolicy::new(3, Duration::from_millis(100), Duration::from_millis(500));
+        assert_eq!(
+            retry_delay(&policy, 1, Some(Duration::from_secs(1))),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            retry_delay(&policy, 1, Some(Duration::from_millis(20))),
+            Duration::from_millis(20)
+        );
+        assert_eq!(retry_delay(&policy, 2, None), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn parses_numeric_retry_after_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(3)));
+
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
+
+        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    struct RetryProbe {
+        calls: std::sync::atomic::AtomicUsize,
+        failures: usize,
+        status: axum::http::StatusCode,
+    }
+
+    async fn retry_probe_handler(
+        axum::extract::State(probe): axum::extract::State<std::sync::Arc<RetryProbe>>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let call = probe
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call < probe.failures {
+            (probe.status, "upstream unavailable").into_response()
+        } else {
+            axum::Json(serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "recovered"},
+                    "finish_reason": "stop"
+                }]
+            }))
+            .into_response()
+        }
+    }
+
+    async fn spawn_retry_probe(probe: std::sync::Arc<RetryProbe>) -> String {
+        let app = axum::Router::new()
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(retry_probe_handler),
+            )
+            .with_state(probe);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{}/v1", port)
+    }
+
+    fn test_messages() -> Vec<ChatMessage> {
+        vec![ChatMessage {
+            content: "hi".to_string(),
+            role: "user".to_string(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn retries_retryable_status_then_succeeds() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let probe = Arc::new(RetryProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: 2,
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        });
+        let api_base = spawn_retry_probe(Arc::clone(&probe)).await;
+
+        let client = LLMClient::new_with_retry(
+            api_base,
+            "sk-test".to_string(),
+            30,
+            RetryPolicy::new(3, Duration::from_millis(1), Duration::from_millis(5)),
+        )
+        .unwrap();
+
+        let result = client
+            .chat_completion("m", test_messages(), Some(0.0))
+            .await
+            .unwrap();
+
+        assert_eq!(result, "recovered");
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            3,
+            "two failures plus one successful attempt expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_retrying_after_max_retries() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let probe = Arc::new(RetryProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: usize::MAX,
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        });
+        let api_base = spawn_retry_probe(Arc::clone(&probe)).await;
+
+        let client = LLMClient::new_with_retry(
+            api_base,
+            "sk-test".to_string(),
+            30,
+            RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(5)),
+        )
+        .unwrap();
+
+        let err = client
+            .chat_completion("m", test_messages(), Some(0.0))
+            .await
+            .expect_err("persistent 503 must eventually fail");
+
+        assert!(
+            err.to_string().contains("503"),
+            "error should include the upstream status: {}",
+            err
+        );
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            3,
+            "max_retries=2 means one initial attempt plus two retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_client_errors() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let probe = Arc::new(RetryProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: usize::MAX,
+            status: axum::http::StatusCode::BAD_REQUEST,
+        });
+        let api_base = spawn_retry_probe(Arc::clone(&probe)).await;
+
+        let client = LLMClient::new_with_retry(
+            api_base,
+            "sk-test".to_string(),
+            30,
+            RetryPolicy::new(3, Duration::from_millis(1), Duration::from_millis(5)),
+        )
+        .unwrap();
+
+        let err = client
+            .chat_completion("m", test_messages(), Some(0.0))
+            .await
+            .expect_err("400 responses are not retryable");
+
+        assert!(err.to_string().contains("400"), "unexpected error: {}", err);
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            1,
+            "client errors must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_policy_disabled_keeps_single_attempt() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let probe = Arc::new(RetryProbe {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            failures: usize::MAX,
+            status: axum::http::StatusCode::BAD_GATEWAY,
+        });
+        let api_base = spawn_retry_probe(Arc::clone(&probe)).await;
+
+        let client = LLMClient::new(api_base, "sk-test".to_string(), 30).unwrap();
+
+        let _ = client
+            .chat_completion("m", test_messages(), Some(0.0))
+            .await
+            .expect_err("502 must fail when retries are disabled");
+
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            1,
+            "disabled retry policy must make exactly one attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_connection_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+
+        let client = LLMClient::new_with_retry(
+            format!("http://127.0.0.1:{}/v1", port),
+            "sk-test".to_string(),
+            5,
+            RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(5)),
+        )
+        .unwrap();
+
+        let _ = client
+            .chat_completion("m", test_messages(), Some(0.0))
+            .await
+            .expect_err("dropped connections must eventually surface an error");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "expected one initial attempt plus two retries for connection failures"
         );
     }
 }
