@@ -1321,4 +1321,105 @@ synthesizer_timeout_secs = 90
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn worker_concurrency_defaults_to_none_when_absent() {
+        let cfg: Config = toml::from_str(CFG_LEGACY).unwrap();
+        assert_eq!(cfg.workflow.worker_concurrency, None);
+    }
+
+    #[test]
+    fn worker_concurrency_parses_from_workflow_table() {
+        let cfg_str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow]
+worker_concurrency = 3
+
+[workflow-integration]
+json = """{
+  "analyzer": {
+    "ref": "m1"
+  },
+  "workers": [
+    {
+      "name": "m1"
+    }
+  ],
+  "synthesizer": {
+    "ref": "m1"
+  }
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
+        let cfg: Config = toml::from_str(cfg_str).unwrap();
+        assert_eq!(cfg.workflow.worker_concurrency, Some(3));
+    }
+
+    #[test]
+    fn migration_preserves_worker_concurrency() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "chorus_worker_concurrency_migration_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.toml");
+
+        let config_content = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+analyzer_model = "m1"
+worker_models = ["m1"]
+synthesizer_model = "m1"
+
+[workflow]
+worker_concurrency = 2
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+        fs::write(&config_path, config_content).unwrap();
+
+        Config::migrate_config_if_needed(&config_path).unwrap();
+
+        let migrated = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            migrated.contains("worker_concurrency = 2"),
+            "migrated config should keep worker_concurrency, got:\n{}",
+            migrated
+        );
+
+        let cfg = Config::load(&config_path.to_string_lossy()).unwrap();
+        assert_eq!(cfg.workflow.worker_concurrency, Some(2));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

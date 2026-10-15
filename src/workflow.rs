@@ -2,6 +2,7 @@ use crate::config::{Config, ModelConfig, WorkflowModelTarget, WorkflowPlan, Work
 use crate::llm::{parse_temperature_from_response, ChatMessage, LLMClient};
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
+use futures::stream::{self, StreamExt as _};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -10,6 +11,7 @@ use tokio::sync::{mpsc::UnboundedSender, RwLock};
 use url::Url;
 
 const DEFAULT_TEMPERATURE: f32 = 1.4;
+const DEFAULT_WORKER_CONCURRENCY: usize = 4;
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct LlmClientCacheKey {
@@ -618,132 +620,27 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             ));
         }
 
-        let mut worker_details = Vec::new();
+        let concurrency = self.worker_concurrency().min(plan.workers.len()).max(1);
 
-        for worker in &plan.workers {
-            match worker {
-                WorkflowWorker::Model(target) => {
-                    if depth == 0 {
-                        tracing::info!("Calling worker model: {}", target.model);
-                    } else {
-                        tracing::debug!("Calling worker model {} at depth {}", target.model, depth);
-                    }
-
-                    let model_config = match self.lookup_model(&target.model) {
-                        Ok(model_config) => model_config,
-                        Err(err) => {
-                            let err_display = err.to_string();
-                            tracing::warn!(
-                                worker = %target.model,
-                                depth,
-                                error = %err_display,
-                                "Worker lookup failed"
-                            );
-                            worker_details.push(WorkerDetails {
-                                name: target.model.clone(),
-                                temperature: None,
-                                response: None,
-                                success: false,
-                                error: Some(err_display),
-                                nested: None,
-                            });
-                            continue;
-                        }
-                    };
-
-                    let temperature = self.resolve_worker_temperature(
-                        target,
-                        model_config,
-                        base_temperature,
-                        analyzer_auto,
-                    );
-
-                    match self
-                        .call_worker_model(target, model_config, temperature, prompt, depth)
-                        .await
-                    {
-                        Ok(response) => {
-                            tracing::debug!("Worker {} succeeded at depth {}", target.model, depth);
-                            worker_details.push(WorkerDetails {
-                                name: target.model.clone(),
-                                temperature: Some(temperature),
-                                response: Some(response),
-                                success: true,
-                                error: None,
-                                nested: None,
-                            });
-                        }
-                        Err(err) => {
-                            let err_display = err.to_string();
-                            tracing::warn!(
-                                worker = %target.model,
-                                depth,
-                                error = %err_display,
-                                "Worker call failed"
-                            );
-                            worker_details.push(WorkerDetails {
-                                name: target.model.clone(),
-                                temperature: Some(temperature),
-                                response: None,
-                                success: false,
-                                error: Some(err_display),
-                                nested: None,
-                            });
-                        }
-                    }
-                }
-                WorkflowWorker::Workflow(sub_plan) => {
-                    let label = sub_plan.label();
-                    if depth == 0 {
-                        tracing::info!("Executing nested workflow worker: {}", label);
-                    } else {
-                        tracing::debug!(
-                            "Executing nested workflow worker {} at depth {}",
-                            label,
-                            depth
-                        );
-                    }
-
-                    match self
-                        .run_plan_with_details(sub_plan, prompt, depth + 1, None)
-                        .await
-                    {
-                        Ok(result) => {
-                            tracing::debug!(
-                                "Nested workflow {} succeeded at depth {}",
-                                label,
-                                depth
-                            );
-                            worker_details.push(WorkerDetails {
-                                name: label.clone(),
-                                temperature: None,
-                                response: Some(result.final_response),
-                                success: true,
-                                error: None,
-                                nested: Some(Box::new(result.execution_details)),
-                            });
-                        }
-                        Err(err) => {
-                            let err_display = err.to_string();
-                            tracing::warn!(
-                                workflow = %label,
-                                depth,
-                                error = %err_display,
-                                "Nested workflow failed"
-                            );
-                            worker_details.push(WorkerDetails {
-                                name: label,
-                                temperature: None,
-                                response: None,
-                                success: false,
-                                error: Some(err_display),
-                                nested: None,
-                            });
-                        }
-                    }
-                }
+        let worker_details: Vec<WorkerDetails> = if concurrency == 1 || plan.workers.len() <= 1 {
+            let mut details = Vec::with_capacity(plan.workers.len());
+            for worker in &plan.workers {
+                details.push(
+                    self.run_single_worker(worker, prompt, base_temperature, analyzer_auto, depth)
+                        .await,
+                );
             }
-        }
+            details
+        } else {
+            let pending: Vec<_> = plan
+                .workers
+                .iter()
+                .map(|worker| {
+                    self.run_single_worker(worker, prompt, base_temperature, analyzer_auto, depth)
+                })
+                .collect();
+            stream::iter(pending).buffered(concurrency).collect().await
+        };
 
         if worker_details.iter().filter(|w| w.success).count() == 0 {
             let worker_errors: Vec<String> = worker_details
@@ -769,6 +666,141 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         }
 
         Ok(worker_details)
+    }
+
+    fn worker_concurrency(&self) -> usize {
+        self.config
+            .workflow
+            .worker_concurrency
+            .unwrap_or(DEFAULT_WORKER_CONCURRENCY)
+            .max(1)
+    }
+
+    async fn run_single_worker(
+        &self,
+        worker: &WorkflowWorker,
+        prompt: &str,
+        base_temperature: f32,
+        analyzer_auto: bool,
+        depth: usize,
+    ) -> WorkerDetails {
+        match worker {
+            WorkflowWorker::Model(target) => {
+                if depth == 0 {
+                    tracing::info!("Calling worker model: {}", target.model);
+                } else {
+                    tracing::debug!("Calling worker model {} at depth {}", target.model, depth);
+                }
+
+                let model_config = match self.lookup_model(&target.model) {
+                    Ok(model_config) => model_config,
+                    Err(err) => {
+                        let err_display = err.to_string();
+                        tracing::warn!(
+                            worker = %target.model,
+                            depth,
+                            error = %err_display,
+                            "Worker lookup failed"
+                        );
+                        return WorkerDetails {
+                            name: target.model.clone(),
+                            temperature: None,
+                            response: None,
+                            success: false,
+                            error: Some(err_display),
+                            nested: None,
+                        };
+                    }
+                };
+
+                let temperature = self.resolve_worker_temperature(
+                    target,
+                    model_config,
+                    base_temperature,
+                    analyzer_auto,
+                );
+
+                match self
+                    .call_worker_model(target, model_config, temperature, prompt, depth)
+                    .await
+                {
+                    Ok(response) => {
+                        tracing::debug!("Worker {} succeeded at depth {}", target.model, depth);
+                        WorkerDetails {
+                            name: target.model.clone(),
+                            temperature: Some(temperature),
+                            response: Some(response),
+                            success: true,
+                            error: None,
+                            nested: None,
+                        }
+                    }
+                    Err(err) => {
+                        let err_display = err.to_string();
+                        tracing::warn!(
+                            worker = %target.model,
+                            depth,
+                            error = %err_display,
+                            "Worker call failed"
+                        );
+                        WorkerDetails {
+                            name: target.model.clone(),
+                            temperature: Some(temperature),
+                            response: None,
+                            success: false,
+                            error: Some(err_display),
+                            nested: None,
+                        }
+                    }
+                }
+            }
+            WorkflowWorker::Workflow(sub_plan) => {
+                let label = sub_plan.label();
+                if depth == 0 {
+                    tracing::info!("Executing nested workflow worker: {}", label);
+                } else {
+                    tracing::debug!(
+                        "Executing nested workflow worker {} at depth {}",
+                        label,
+                        depth
+                    );
+                }
+
+                match self
+                    .run_plan_with_details(sub_plan, prompt, depth + 1, None)
+                    .await
+                {
+                    Ok(result) => {
+                        tracing::debug!("Nested workflow {} succeeded at depth {}", label, depth);
+                        WorkerDetails {
+                            name: label.clone(),
+                            temperature: None,
+                            response: Some(result.final_response),
+                            success: true,
+                            error: None,
+                            nested: Some(Box::new(result.execution_details)),
+                        }
+                    }
+                    Err(err) => {
+                        let err_display = err.to_string();
+                        tracing::warn!(
+                            workflow = %label,
+                            depth,
+                            error = %err_display,
+                            "Nested workflow failed"
+                        );
+                        WorkerDetails {
+                            name: label,
+                            temperature: None,
+                            response: None,
+                            success: false,
+                            error: Some(err_display),
+                            nested: None,
+                        }
+                    }
+                }
+            }
+        }
     }
 
     async fn call_worker_model(
@@ -1455,7 +1487,13 @@ mod tests {
         Config, ModelConfig, ServerConfig, TimeoutConfig, WorkflowConfig, WorkflowModelTarget,
         WorkflowPlan, WorkflowWorker,
     };
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::{json, Value};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
 
     fn build_test_config_with_workers(workers: Vec<WorkflowWorker>) -> Config {
         Config {
@@ -1492,6 +1530,7 @@ mod tests {
                     synthesizer_timeout_secs: 30,
                 },
                 domains: HashMap::new(),
+                worker_concurrency: None,
             },
         }
     }
@@ -1772,6 +1811,227 @@ mod tests {
             message.contains("Worker errors"),
             "message did not include worker errors section: {}",
             message
+        );
+    }
+
+    struct ConcurrencyProbe {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        calls: AtomicUsize,
+        delay: Duration,
+        barrier: Option<Arc<Barrier>>,
+    }
+
+    impl ConcurrencyProbe {
+        fn new(delay: Duration, barrier: Option<Arc<Barrier>>) -> Self {
+            Self {
+                active: AtomicUsize::new(0),
+                max_active: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
+                delay,
+                barrier,
+            }
+        }
+    }
+
+    async fn concurrency_probe_handler(
+        State(probe): State<Arc<ConcurrencyProbe>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let current = probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+        probe.max_active.fetch_max(current, Ordering::SeqCst);
+        probe.calls.fetch_add(1, Ordering::SeqCst);
+
+        if let Some(barrier) = &probe.barrier {
+            barrier.wait().await;
+        }
+        if !probe.delay.is_zero() {
+            tokio::time::sleep(probe.delay).await;
+        }
+
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let content = format!("echo:{}", model);
+
+        probe.active.fetch_sub(1, Ordering::SeqCst);
+
+        Json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop"
+            }]
+        }))
+    }
+
+    async fn spawn_concurrency_probe(probe: Arc<ConcurrencyProbe>) -> String {
+        let app = Router::new()
+            .route("/v1/chat/completions", post(concurrency_probe_handler))
+            .with_state(probe);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{}/v1", port)
+    }
+
+    fn build_network_test_config(
+        api_base: &str,
+        model_names: &[&str],
+        concurrency: Option<usize>,
+    ) -> Config {
+        let models = model_names
+            .iter()
+            .map(|name| ModelConfig {
+                name: (*name).to_string(),
+                api_base: api_base.to_string(),
+                api_key: "sk-test".to_string(),
+                temperature: None,
+                auto_temperature: None,
+            })
+            .collect();
+        let workers = model_names
+            .iter()
+            .map(|name| {
+                WorkflowWorker::Model(WorkflowModelTarget {
+                    model: (*name).to_string(),
+                    temperature: None,
+                    auto_temperature: None,
+                })
+            })
+            .collect();
+
+        Config {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+            },
+            models,
+            workflow_integration: WorkflowPlan {
+                analyzer: WorkflowModelTarget {
+                    model: model_names[0].to_string(),
+                    temperature: None,
+                    auto_temperature: None,
+                },
+                workers,
+                synthesizer: Some(WorkflowModelTarget {
+                    model: model_names[0].to_string(),
+                    temperature: None,
+                    auto_temperature: None,
+                }),
+                selector: None,
+                nested_worker_depth: None,
+            },
+            workflow: WorkflowConfig {
+                timeouts: TimeoutConfig {
+                    analyzer_timeout_secs: 30,
+                    worker_timeout_secs: 30,
+                    synthesizer_timeout_secs: 30,
+                },
+                domains: HashMap::new(),
+                worker_concurrency: concurrency,
+            },
+        }
+    }
+
+    #[test]
+    fn worker_concurrency_defaults_and_bounds() {
+        let mut config = build_test_config_with_workers(Vec::new());
+
+        let engine = WorkflowEngine::new(config.clone());
+        assert_eq!(engine.worker_concurrency(), DEFAULT_WORKER_CONCURRENCY);
+
+        config.workflow.worker_concurrency = Some(2);
+        let engine = WorkflowEngine::new(config.clone());
+        assert_eq!(engine.worker_concurrency(), 2);
+
+        config.workflow.worker_concurrency = Some(0);
+        let engine = WorkflowEngine::new(config);
+        assert_eq!(engine.worker_concurrency(), 1);
+    }
+
+    #[tokio::test]
+    async fn workers_dispatch_concurrently_and_preserve_configuration_order() {
+        let barrier = Arc::new(Barrier::new(3));
+        let probe = Arc::new(ConcurrencyProbe::new(Duration::ZERO, Some(barrier)));
+        let api_base = spawn_concurrency_probe(Arc::clone(&probe)).await;
+        let config = build_network_test_config(&api_base, &["alpha", "beta", "gamma"], None);
+        let engine = WorkflowEngine::new(config);
+
+        let details = tokio::time::timeout(
+            Duration::from_secs(10),
+            engine.run_workers_with_details(
+                &engine.config.workflow_integration,
+                "ping",
+                1.0,
+                false,
+                0,
+            ),
+        )
+        .await
+        .expect("workers should reach the barrier concurrently instead of running sequentially")
+        .expect("workers should succeed");
+
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        let names: Vec<&str> = details.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta", "gamma"]);
+        for details_entry in &details {
+            assert!(
+                details_entry.success,
+                "worker {} failed",
+                details_entry.name
+            );
+            assert_eq!(
+                details_entry.response.as_deref(),
+                Some(format!("echo:{}", details_entry.name).as_str()),
+                "worker responses must stay associated with their model"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn workers_respect_configured_concurrency_limit() {
+        let probe = Arc::new(ConcurrencyProbe::new(Duration::from_millis(200), None));
+        let api_base = spawn_concurrency_probe(Arc::clone(&probe)).await;
+        let config = build_network_test_config(&api_base, &["a", "b", "c"], Some(2));
+        let engine = WorkflowEngine::new(config);
+
+        let details = engine
+            .run_workers_with_details(&engine.config.workflow_integration, "ping", 1.0, false, 0)
+            .await
+            .expect("workers should succeed");
+
+        assert_eq!(details.len(), 3);
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        assert!(
+            probe.max_active.load(Ordering::SeqCst) >= 2,
+            "expected at least two overlapping worker calls"
+        );
+        assert!(details.iter().all(|d| d.success));
+    }
+
+    #[tokio::test]
+    async fn worker_concurrency_one_keeps_calls_sequential() {
+        let probe = Arc::new(ConcurrencyProbe::new(Duration::from_millis(50), None));
+        let api_base = spawn_concurrency_probe(Arc::clone(&probe)).await;
+        let config = build_network_test_config(&api_base, &["a", "b", "c"], Some(1));
+        let engine = WorkflowEngine::new(config);
+
+        let details = engine
+            .run_workers_with_details(&engine.config.workflow_integration, "ping", 1.0, false, 0)
+            .await
+            .expect("workers should succeed");
+
+        assert_eq!(details.len(), 3);
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            probe.max_active.load(Ordering::SeqCst),
+            1,
+            "concurrency limit of one must not overlap worker calls"
         );
     }
 }

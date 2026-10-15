@@ -570,6 +570,8 @@ pub struct WorkflowConfig {
     pub timeouts: TimeoutConfig,
     #[serde(default)]
     pub domains: HashMap<String, DomainTimeoutOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_concurrency: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
