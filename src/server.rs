@@ -104,33 +104,185 @@ fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
     }
 
     let mut chunks = Vec::new();
-    let mut current = String::new();
+    let mut start = 0usize;
     let mut current_len = 0usize;
 
-    for ch in content.chars() {
+    for (idx, ch) in content.char_indices() {
         current_len += ch.len_utf8();
-        current.push(ch);
 
         if ch == '\n' || current_len >= max_len {
-            chunks.push(current);
-            current = String::new();
+            let end = idx + ch.len_utf8();
+            chunks.push(content[start..end].to_string());
+            start = end;
             current_len = 0;
         }
     }
 
-    if !current.is_empty() {
-        chunks.push(current);
+    if start < content.len() {
+        chunks.push(content[start..].to_string());
     }
 
     chunks
 }
 
 fn build_prompt_from_messages(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut prompt = String::new();
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 {
+            prompt.push('\n');
+        }
+        prompt.push_str(&message.role);
+        prompt.push_str(": ");
+        prompt.push_str(&message.content);
+    }
+    prompt
+}
+
+#[derive(Serialize)]
+struct GenerateStreamChunk<'a> {
+    created_at: &'a str,
+    done: bool,
+    model: &'a str,
+    response: &'a str,
+}
+
+#[derive(Serialize)]
+struct ChatStreamMessage<'a> {
+    content: &'a str,
+    role: &'static str,
+}
+
+#[derive(Serialize)]
+struct ChatStreamChunk<'a> {
+    created_at: &'a str,
+    done: bool,
+    message: ChatStreamMessage<'a>,
+    model: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiDeltaContent<'a> {
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiChatChoice<'a> {
+    delta: OpenAiDeltaContent<'a>,
+    finish_reason: Option<&'static str>,
+    index: u32,
+}
+
+#[derive(Serialize)]
+struct OpenAiChatStreamChunk<'a> {
+    choices: [OpenAiChatChoice<'a>; 1],
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompletionChoice<'a> {
+    finish_reason: Option<&'static str>,
+    index: u32,
+    logprobs: Option<()>,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompletionStreamChunk<'a> {
+    choices: [OpenAiCompletionChoice<'a>; 1],
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+}
+
+#[derive(Serialize)]
+struct ResponsesDelta<'a> {
+    text: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct ResponsesDeltaChunk<'a> {
+    content_index: usize,
+    created: i64,
+    delta: ResponsesDelta<'a>,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    output_index: u32,
+}
+
+#[derive(Serialize)]
+struct OpenAiChatCompletionMessage<'a> {
+    content: &'a str,
+    role: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiChatCompletionChoice<'a> {
+    finish_reason: &'static str,
+    index: u32,
+    message: OpenAiChatCompletionMessage<'a>,
+}
+
+#[derive(Serialize)]
+struct OpenAiChatCompletionResponse<'a> {
+    choices: [OpenAiChatCompletionChoice<'a>; 1],
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    workflow: Option<WorkflowExecutionDetails>,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompletionResponseChoice<'a> {
+    finish_reason: &'static str,
+    index: u32,
+    logprobs: Option<()>,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiCompletionResponse<'a> {
+    choices: [OpenAiCompletionResponseChoice<'a>; 1],
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    workflow: Option<WorkflowExecutionDetails>,
+}
+
+#[derive(Serialize)]
+struct ResponsesOutputContent<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct ResponsesOutputMessage<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    role: &'static str,
+    content: [ResponsesOutputContent<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct ResponsesResponse<'a> {
+    id: &'a str,
+    object: &'static str,
+    created: i64,
+    model: &'a str,
+    status: &'static str,
+    output: [ResponsesOutputMessage<'a>; 1],
+    output_text: &'a str,
+    workflow: Option<WorkflowExecutionDetails>,
 }
 
 async fn execute_workflow(
@@ -244,34 +396,30 @@ async fn generate(
                 &state_clone,
                 prompt,
                 include_workflow_details,
-                Some(chunk_tx.clone()),
+                Some(chunk_tx),
             )
             .await;
-            drop(chunk_tx);
             let _ = result_tx.send(result);
         });
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let model_name = model_name.clone();
-                let created_at = created_at.clone();
+                let model_name: Arc<str> = Arc::from(model_name.as_str());
+                let created_at: Arc<str> = Arc::from(created_at.as_str());
                 move |segment| {
-                    let model_name = model_name.clone();
-                    let created_at = created_at.clone();
-                    let pieces = if segment.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        chunk_text(&segment, STREAM_CHUNK_SIZE)
-                    };
+                    let model_name = Arc::clone(&model_name);
+                    let created_at = Arc::clone(&created_at);
+                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
                     stream::iter(pieces.into_iter().map(
                         move |piece| -> Result<Event, Infallible> {
-                            let payload = serde_json::json!({
-                                "model": model_name,
-                                "created_at": created_at,
-                                "response": piece,
-                                "done": false,
-                            });
-                            Ok(Event::default().json_data(payload).unwrap())
+                            Ok(Event::default()
+                                .json_data(GenerateStreamChunk {
+                                    created_at: &created_at,
+                                    done: false,
+                                    model: &model_name,
+                                    response: piece.as_str(),
+                                })
+                                .unwrap())
                         },
                     ))
                 }
@@ -360,37 +508,33 @@ async fn chat(
                 &state_clone,
                 prompt,
                 include_workflow_details,
-                Some(chunk_tx.clone()),
+                Some(chunk_tx),
             )
             .await;
-            drop(chunk_tx);
             let _ = result_tx.send(result);
         });
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let model_name = model_name.clone();
-                let created_at = created_at.clone();
+                let model_name: Arc<str> = Arc::from(model_name.as_str());
+                let created_at: Arc<str> = Arc::from(created_at.as_str());
                 move |segment| {
-                    let model_name = model_name.clone();
-                    let created_at = created_at.clone();
-                    let pieces = if segment.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        chunk_text(&segment, STREAM_CHUNK_SIZE)
-                    };
+                    let model_name = Arc::clone(&model_name);
+                    let created_at = Arc::clone(&created_at);
+                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
                     stream::iter(pieces.into_iter().map(
                         move |piece| -> Result<Event, Infallible> {
-                            let payload = serde_json::json!({
-                                "model": model_name,
-                                "created_at": created_at,
-                                "message": {
-                                    "role": "assistant",
-                                    "content": piece,
-                                },
-                                "done": false,
-                            });
-                            Ok(Event::default().json_data(payload).unwrap())
+                            Ok(Event::default()
+                                .json_data(ChatStreamChunk {
+                                    created_at: &created_at,
+                                    done: false,
+                                    message: ChatStreamMessage {
+                                        content: piece.as_str(),
+                                        role: "assistant",
+                                    },
+                                    model: &model_name,
+                                })
+                                .unwrap())
                         },
                     ))
                 }
@@ -495,10 +639,9 @@ async fn openai_chat_completions(
                 &state_clone,
                 prompt,
                 include_workflow_details,
-                Some(chunk_tx.clone()),
+                Some(chunk_tx),
             )
             .await;
-            drop(chunk_tx);
             let _ = result_tx.send(result);
         });
 
@@ -523,30 +666,29 @@ async fn openai_chat_completions(
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let id = id.clone();
-                let model_name = model_name.clone();
+                let id: Arc<str> = Arc::from(id.as_str());
+                let model_name: Arc<str> = Arc::from(model_name.as_str());
                 move |segment| {
-                    let id = id.clone();
-                    let model_name = model_name.clone();
-                    let pieces = if segment.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        chunk_text(&segment, STREAM_CHUNK_SIZE)
-                    };
+                    let id = Arc::clone(&id);
+                    let model_name = Arc::clone(&model_name);
+                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
                     stream::iter(pieces.into_iter().map(
                         move |piece| -> Result<Event, Infallible> {
-                            let payload = serde_json::json!({
-                                "id": id.clone(),
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model_name.clone(),
-                                "choices": [ {
-                                    "index": 0,
-                                    "delta": { "content": piece },
-                                    "finish_reason": serde_json::Value::Null
-                                } ]
-                            });
-                            Ok(Event::default().json_data(payload).unwrap())
+                            Ok(Event::default()
+                                .json_data(OpenAiChatStreamChunk {
+                                    choices: [OpenAiChatChoice {
+                                        delta: OpenAiDeltaContent {
+                                            content: piece.as_str(),
+                                        },
+                                        finish_reason: None,
+                                        index: 0,
+                                    }],
+                                    created,
+                                    id: &id,
+                                    model: &model_name,
+                                    object: "chat.completion.chunk",
+                                })
+                                .unwrap())
                         },
                     ))
                 }
@@ -625,22 +767,22 @@ async fn openai_chat_completions(
     let created = now.timestamp();
     let id = format!("chatcmpl_{}", now.timestamp_millis());
 
-    let body = serde_json::json!({
-        "id": id,
-        "object": "chat.completion",
-        "created": created,
-        "model": model_name,
-        "choices": [ {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": response_text
+    Ok(Json(OpenAiChatCompletionResponse {
+        choices: [OpenAiChatCompletionChoice {
+            finish_reason: "stop",
+            index: 0,
+            message: OpenAiChatCompletionMessage {
+                content: &response_text,
+                role: "assistant",
             },
-            "finish_reason": "stop"
-        } ],
-        "workflow": workflow_details,
-    });
-    Ok(Json(body).into_response())
+        }],
+        created,
+        id: &id,
+        model: &model_name,
+        object: "chat.completion",
+        workflow: workflow_details,
+    })
+    .into_response())
 }
 
 async fn openai_completions(
@@ -670,40 +812,36 @@ async fn openai_completions(
                 &state_clone,
                 prompt,
                 include_workflow_details,
-                Some(chunk_tx.clone()),
+                Some(chunk_tx),
             )
             .await;
-            drop(chunk_tx);
             let _ = result_tx.send(result);
         });
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let id = id.clone();
-                let model_name = model_name.clone();
+                let id: Arc<str> = Arc::from(id.as_str());
+                let model_name: Arc<str> = Arc::from(model_name.as_str());
                 move |segment| {
-                    let id = id.clone();
-                    let model_name = model_name.clone();
-                    let pieces = if segment.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        chunk_text(&segment, STREAM_CHUNK_SIZE)
-                    };
+                    let id = Arc::clone(&id);
+                    let model_name = Arc::clone(&model_name);
+                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
                     stream::iter(pieces.into_iter().map(
                         move |piece| -> Result<Event, Infallible> {
-                            let payload = serde_json::json!({
-                                "id": id.clone(),
-                                "object": "text_completion",
-                                "created": created,
-                                "model": model_name.clone(),
-                                "choices": [ {
-                                    "text": piece,
-                                    "index": 0,
-                                    "logprobs": serde_json::Value::Null,
-                                    "finish_reason": serde_json::Value::Null
-                                } ]
-                            });
-                            Ok(Event::default().json_data(payload).unwrap())
+                            Ok(Event::default()
+                                .json_data(OpenAiCompletionStreamChunk {
+                                    choices: [OpenAiCompletionChoice {
+                                        finish_reason: None,
+                                        index: 0,
+                                        logprobs: None,
+                                        text: piece.as_str(),
+                                    }],
+                                    created,
+                                    id: &id,
+                                    model: &model_name,
+                                    object: "text_completion",
+                                })
+                                .unwrap())
                         },
                     ))
                 }
@@ -782,21 +920,20 @@ async fn openai_completions(
     let created = now.timestamp();
     let id = format!("cmpl_{}", now.timestamp_millis());
 
-    let body = serde_json::json!({
-        "id": id,
-        "object": "text_completion",
-        "created": created,
-        "model": model_name,
-        "choices": [ {
-            "text": response_text,
-            "index": 0,
-            "logprobs": serde_json::Value::Null,
-            "finish_reason": "stop"
-        } ],
-        "workflow": workflow_details,
-    });
-
-    Ok(Json(body).into_response())
+    Ok(Json(OpenAiCompletionResponse {
+        choices: [OpenAiCompletionResponseChoice {
+            finish_reason: "stop",
+            index: 0,
+            logprobs: None,
+            text: &response_text,
+        }],
+        created,
+        id: &id,
+        model: &model_name,
+        object: "text_completion",
+        workflow: workflow_details,
+    })
+    .into_response())
 }
 
 fn extract_text_value(value: &Value) -> Option<String> {
@@ -1002,16 +1139,14 @@ async fn responses(
         let (result_tx, result_rx) = oneshot::channel();
 
         let state_clone = state.clone();
-        let prompt_for_stream = prompt.clone();
         tokio::spawn(async move {
             let result = execute_workflow(
                 &state_clone,
-                prompt_for_stream,
+                prompt,
                 include_workflow_details,
-                Some(chunk_tx.clone()),
+                Some(chunk_tx),
             )
             .await;
-            drop(chunk_tx);
             let _ = result_tx.send(result);
         });
 
@@ -1048,38 +1183,31 @@ async fn responses(
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let resp_id = resp_id.clone();
-                let model_name = model_name.clone();
-                let created = created;
-                let content_index = content_index.clone();
+                let resp_id: Arc<str> = Arc::from(resp_id.as_str());
+                let model_name: Arc<str> = Arc::from(model_name.as_str());
+                let content_index = Arc::clone(&content_index);
                 move |segment| {
-                    let resp_id = resp_id.clone();
-                    let model_name = model_name.clone();
-                    let created = created;
-                    let content_index = content_index.clone();
-                    let pieces = if segment.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        chunk_text(&segment, STREAM_CHUNK_SIZE)
-                    };
+                    let resp_id = Arc::clone(&resp_id);
+                    let model_name = Arc::clone(&model_name);
+                    let content_index = Arc::clone(&content_index);
+                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
                     stream::iter(pieces.into_iter().map(
                         move |piece| -> Result<Event, Infallible> {
                             let index = content_index.fetch_add(1, Ordering::SeqCst);
-                            let payload = serde_json::json!({
-                                "id": resp_id.clone(),
-                                "object": "response.output_text.delta",
-                                "created": created,
-                                "model": model_name.clone(),
-                                "output_index": 0,
-                                "content_index": index,
-                                "delta": {
-                                    "type": "output_text.delta",
-                                    "text": piece
-                                },
-                            });
                             Ok(Event::default()
                                 .event("response.output_text.delta")
-                                .json_data(payload)
+                                .json_data(ResponsesDeltaChunk {
+                                    content_index: index,
+                                    created,
+                                    delta: ResponsesDelta {
+                                        text: piece.as_str(),
+                                        kind: "output_text.delta",
+                                    },
+                                    id: &resp_id,
+                                    model: &model_name,
+                                    object: "response.output_text.delta",
+                                    output_index: 0,
+                                })
                                 .unwrap())
                         },
                     ))
@@ -1190,25 +1318,29 @@ async fn responses(
     );
 
     let now = chrono::Utc::now();
-    let resp = serde_json::json!({
-        "id": format!("resp_{}", now.timestamp_millis()),
-        "object": "response",
-        "created": now.timestamp(),
-        "model": model_name,
-        "status": "completed",
-        "output": [
-            {
-                "id": format!("msg_{}", now.timestamp_millis()),
-                "type": "message",
-                "role": "assistant",
-                "content": [ { "type": "output_text", "text": response_text } ]
-            }
-        ],
-        "output_text": response_text,
-        "workflow": workflow_details,
-    });
+    let resp_id = format!("resp_{}", now.timestamp_millis());
+    let msg_id = format!("msg_{}", now.timestamp_millis());
+    let created = now.timestamp();
 
-    Ok(Json(resp).into_response())
+    Ok(Json(ResponsesResponse {
+        id: &resp_id,
+        object: "response",
+        created,
+        model: &model_name,
+        status: "completed",
+        output: [ResponsesOutputMessage {
+            id: &msg_id,
+            kind: "message",
+            role: "assistant",
+            content: [ResponsesOutputContent {
+                kind: "output_text",
+                text: &response_text,
+            }],
+        }],
+        output_text: &response_text,
+        workflow: workflow_details,
+    })
+    .into_response())
 }
 
 async fn list_models_openai(State(state): State<SharedState>) -> impl IntoResponse {
@@ -1235,6 +1367,7 @@ async fn list_models_openai(State(state): State<SharedState>) -> impl IntoRespon
 }
 
 async fn list_models(State(state): State<SharedState>) -> impl IntoResponse {
+    let modified_at = chrono::Utc::now().to_rfc3339();
     let models: Vec<_> = state
         .config
         .models
@@ -1243,7 +1376,7 @@ async fn list_models(State(state): State<SharedState>) -> impl IntoResponse {
             serde_json::json!({
                 "name": m.name,
                 "model": m.name,
-                "modified_at": chrono::Utc::now().to_rfc3339(),
+                "modified_at": modified_at,
             })
         })
         .collect();
@@ -1348,6 +1481,355 @@ mod responses_tests {
 
         let response = super::AppError::bad_request(anyhow::anyhow!("bad request")).into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod stream_payload_tests {
+    use super::*;
+
+    fn reference_chunk_text(content: &str, max_len: usize) -> Vec<String> {
+        if content.is_empty() {
+            return vec![String::new()];
+        }
+
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        let mut current_len = 0usize;
+
+        for ch in content.chars() {
+            current_len += ch.len_utf8();
+            current.push(ch);
+
+            if ch == '\n' || current_len >= max_len {
+                chunks.push(current);
+                current = String::new();
+                current_len = 0;
+            }
+        }
+
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+
+        chunks
+    }
+
+    #[test]
+    fn chunk_text_matches_reference_implementation() {
+        let cases: Vec<String> = vec![
+            String::new(),
+            "hello world".to_string(),
+            "line1\nline2\n".to_string(),
+            "\n\n".to_string(),
+            "中文测试内容比较长一些".to_string(),
+            "x".repeat(500),
+            "a\nbbb\nccccc".to_string(),
+            "emoji 😀😀😀 tail".to_string(),
+            "a".repeat(STREAM_CHUNK_SIZE * 2 + 1),
+        ];
+
+        for case in &cases {
+            let case = case.as_str();
+            for max_len in [1usize, 3, 7, STREAM_CHUNK_SIZE] {
+                assert_eq!(
+                    chunk_text(case, max_len),
+                    reference_chunk_text(case, max_len),
+                    "case {:?} with max_len {}",
+                    case,
+                    max_len
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_building_matches_reference_implementation() {
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: "hello\nworld".to_string(),
+            },
+            Message {
+                role: "tool".to_string(),
+                content: String::new(),
+            },
+        ];
+
+        let expected = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(build_prompt_from_messages(&messages), expected);
+        assert_eq!(build_prompt_from_messages(&[]), String::new());
+    }
+
+    #[test]
+    fn stream_payloads_match_legacy_json_macro_output() {
+        let created = 1234i64;
+
+        let chunk = GenerateStreamChunk {
+            created_at: "t",
+            done: false,
+            model: "m",
+            response: "r",
+        };
+        let legacy = serde_json::json!({
+            "model": "m",
+            "created_at": "t",
+            "response": "r",
+            "done": false,
+        });
+        assert_eq!(serde_json::to_string(&chunk).unwrap(), legacy.to_string());
+
+        let chat = ChatStreamChunk {
+            created_at: "t",
+            done: false,
+            message: ChatStreamMessage {
+                content: "r",
+                role: "assistant",
+            },
+            model: "m",
+        };
+        let legacy = serde_json::json!({
+            "model": "m",
+            "created_at": "t",
+            "message": { "role": "assistant", "content": "r" },
+            "done": false,
+        });
+        assert_eq!(serde_json::to_string(&chat).unwrap(), legacy.to_string());
+
+        let openai_chat = OpenAiChatStreamChunk {
+            choices: [OpenAiChatChoice {
+                delta: OpenAiDeltaContent { content: "r" },
+                finish_reason: None,
+                index: 0,
+            }],
+            created,
+            id: "id",
+            model: "m",
+            object: "chat.completion.chunk",
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": "m",
+            "choices": [ {
+                "index": 0,
+                "delta": { "content": "r" },
+                "finish_reason": serde_json::Value::Null
+            } ]
+        });
+        assert_eq!(serde_json::to_string(&openai_chat).unwrap(), legacy.to_string());
+
+        let openai_completion = OpenAiCompletionStreamChunk {
+            choices: [OpenAiCompletionChoice {
+                finish_reason: None,
+                index: 0,
+                logprobs: None,
+                text: "r",
+            }],
+            created,
+            id: "id",
+            model: "m",
+            object: "text_completion",
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "text_completion",
+            "created": created,
+            "model": "m",
+            "choices": [ {
+                "text": "r",
+                "index": 0,
+                "logprobs": serde_json::Value::Null,
+                "finish_reason": serde_json::Value::Null
+            } ]
+        });
+        assert_eq!(
+            serde_json::to_string(&openai_completion).unwrap(),
+            legacy.to_string()
+        );
+
+        let responses = ResponsesDeltaChunk {
+            content_index: 2,
+            created,
+            delta: ResponsesDelta {
+                text: "r",
+                kind: "output_text.delta",
+            },
+            id: "id",
+            model: "m",
+            object: "response.output_text.delta",
+            output_index: 0,
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "response.output_text.delta",
+            "created": created,
+            "model": "m",
+            "output_index": 0,
+            "content_index": 2,
+            "delta": {
+                "type": "output_text.delta",
+                "text": "r"
+            },
+        });
+        assert_eq!(serde_json::to_string(&responses).unwrap(), legacy.to_string());
+    }
+
+    #[test]
+    fn non_stream_payloads_match_legacy_json_macro_output() {
+        let created = 1234i64;
+
+        let chat = OpenAiChatCompletionResponse {
+            choices: [OpenAiChatCompletionChoice {
+                finish_reason: "stop",
+                index: 0,
+                message: OpenAiChatCompletionMessage {
+                    content: "r",
+                    role: "assistant",
+                },
+            }],
+            created,
+            id: "id",
+            model: "m",
+            object: "chat.completion",
+            workflow: None,
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "chat.completion",
+            "created": created,
+            "model": "m",
+            "choices": [ {
+                "index": 0,
+                "message": { "role": "assistant", "content": "r" },
+                "finish_reason": "stop"
+            } ],
+            "workflow": serde_json::Value::Null,
+        });
+        assert_eq!(serde_json::to_string(&chat).unwrap(), legacy.to_string());
+
+        let completion = OpenAiCompletionResponse {
+            choices: [OpenAiCompletionResponseChoice {
+                finish_reason: "stop",
+                index: 0,
+                logprobs: None,
+                text: "r",
+            }],
+            created,
+            id: "id",
+            model: "m",
+            object: "text_completion",
+            workflow: None,
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "text_completion",
+            "created": created,
+            "model": "m",
+            "choices": [ {
+                "text": "r",
+                "index": 0,
+                "logprobs": serde_json::Value::Null,
+                "finish_reason": "stop"
+            } ],
+            "workflow": serde_json::Value::Null,
+        });
+        assert_eq!(serde_json::to_string(&completion).unwrap(), legacy.to_string());
+
+        let responses = ResponsesResponse {
+            id: "resp_1",
+            object: "response",
+            created,
+            model: "m",
+            status: "completed",
+            output: [ResponsesOutputMessage {
+                id: "msg_1",
+                kind: "message",
+                role: "assistant",
+                content: [ResponsesOutputContent {
+                    kind: "output_text",
+                    text: "r",
+                }],
+            }],
+            output_text: "r",
+            workflow: None,
+        };
+        let legacy = serde_json::json!({
+            "id": "resp_1",
+            "object": "response",
+            "created": created,
+            "model": "m",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [ { "type": "output_text", "text": "r" } ]
+                }
+            ],
+            "output_text": "r",
+            "workflow": serde_json::Value::Null,
+        });
+        assert_eq!(
+            serde_json::to_value(&responses).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
+
+        let details = WorkflowExecutionDetails {
+            analyzer: crate::workflow::AnalyzerDetails {
+                model: "m".to_string(),
+                temperature: 1.0,
+                auto_temperature: false,
+            },
+            workers: Vec::new(),
+            selector: None,
+            synthesizer: None,
+        };
+        let with_workflow = OpenAiChatCompletionResponse {
+            choices: [OpenAiChatCompletionChoice {
+                finish_reason: "stop",
+                index: 0,
+                message: OpenAiChatCompletionMessage {
+                    content: "r",
+                    role: "assistant",
+                },
+            }],
+            created,
+            id: "id",
+            model: "m",
+            object: "chat.completion",
+            workflow: Some(details),
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "chat.completion",
+            "created": created,
+            "model": "m",
+            "choices": [ {
+                "index": 0,
+                "message": { "role": "assistant", "content": "r" },
+                "finish_reason": "stop"
+            } ],
+            "workflow": {
+                "analyzer": { "model": "m", "temperature": 1.0, "auto_temperature": false },
+                "workers": [],
+            },
+        });
+        assert_eq!(
+            serde_json::to_value(with_workflow).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
     }
 }
 

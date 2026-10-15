@@ -2,14 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: String,
     pub content: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,11 +44,20 @@ pub struct CompletionResult {
     pub streamed: bool,
 }
 
+#[derive(Serialize)]
+struct ChatCompletionRequest<'a> {
+    messages: &'a [ChatMessage],
+    model: &'a str,
+    stream: bool,
+    temperature: Option<f64>,
+}
+
 #[derive(Clone)]
 pub struct LLMClient {
     client: Client,
     api_base: String,
-    api_key: String,
+    authorization: String,
+    chat_completions_url: String,
 }
 
 impl LLMClient {
@@ -59,10 +67,14 @@ impl LLMClient {
             .build()
             .with_context(|| format!("Failed to build HTTP client for {}", api_base))?;
 
+        let chat_completions_url =
+            format!("{}/chat/completions", api_base.trim_end_matches('/'));
+
         Ok(Self {
             client,
             api_base,
-            api_key,
+            authorization: format!("Bearer {}", api_key),
+            chat_completions_url,
         })
     }
 
@@ -85,27 +97,25 @@ impl LLMClient {
         temperature: Option<f32>,
         stream: Option<UnboundedSender<String>>,
     ) -> Result<CompletionResult> {
-        let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
+        let request = ChatCompletionRequest {
+            messages: &messages,
+            model,
+            stream: stream.is_some(),
+            temperature: temperature.map(f64::from),
+        };
 
-        let request_body = json!({
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": stream.is_some(),
-        });
-
-        tracing::debug!("Calling LLM API: {} with model: {}", url, model);
         tracing::debug!(
-            "Request body: {}",
-            serde_json::to_string_pretty(&request_body)?
+            "Calling LLM API: {} with model: {}",
+            self.chat_completions_url,
+            model
         );
+        tracing::debug!("Request body: {}", serde_json::to_string_pretty(&request)?);
 
         let response = self
             .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&request_body)
+            .post(&self.chat_completions_url)
+            .header("Authorization", &self.authorization)
+            .json(&request)
             .send()
             .await?;
 
@@ -156,6 +166,7 @@ impl LLMClient {
         let mut final_text = String::new();
         let mut streamed = false;
         let mut buffer = String::new();
+        let mut cursor = 0usize;
         let mut byte_stream = response.bytes_stream();
 
         while let Some(item) = byte_stream.next().await {
@@ -164,20 +175,18 @@ impl LLMClient {
             buffer.push_str(&chunk_str);
 
             loop {
-                let Some((idx, sep_len)) = find_event_separator(&buffer) else {
+                let Some((idx, sep_len)) = find_event_separator(&buffer[cursor..]) else {
                     break;
                 };
 
-                let mut event = buffer[..idx].to_string();
-                buffer.drain(..idx + sep_len);
+                let event = &buffer[cursor..cursor + idx];
+                cursor += idx + sep_len;
 
                 if event.trim().is_empty() {
                     continue;
                 }
 
-                if event.ends_with('\r') {
-                    event.pop();
-                }
+                let event = event.strip_suffix('\r').unwrap_or(event);
 
                 let mut data_payload = String::new();
                 for line in event.lines() {
@@ -243,6 +252,11 @@ impl LLMClient {
                         }
                     }
                 }
+            }
+
+            if cursor > 0 {
+                buffer.drain(..cursor);
+                cursor = 0;
             }
         }
 
@@ -649,7 +663,7 @@ pub fn parse_temperature_from_response(response: &str) -> f32 {
     }
 
     for line in response.lines() {
-        if line.to_lowercase().contains("temperature") {
+        if contains_ascii_case_insensitive(line, "temperature") {
             if let Some(value_part) = line.split_once(':').map(|x| x.1) {
                 if let Some(value) = parse_numeric_fragment(value_part) {
                     return clamp_temperature(value);
@@ -663,6 +677,20 @@ pub fn parse_temperature_from_response(response: &str) -> f32 {
     }
 
     1.4
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack = haystack.as_bytes();
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn parse_temperature_from_json(response: &str) -> Option<f32> {
@@ -769,5 +797,33 @@ mod tests {
             "msg": "ok"
         });
         assert!(detect_provider_error(&value).is_none());
+    }
+
+    #[test]
+    fn request_body_matches_legacy_value_serialization() {
+        let messages = vec![ChatMessage {
+            content: "hello".to_string(),
+            role: "user".to_string(),
+        }];
+        let temperature = Some(0.3f32);
+
+        let request = ChatCompletionRequest {
+            messages: &messages,
+            model: "test-model",
+            stream: true,
+            temperature: temperature.map(f64::from),
+        };
+
+        let legacy = serde_json::json!({
+            "model": "test-model",
+            "messages": messages,
+            "temperature": temperature,
+            "stream": true,
+        });
+
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            legacy.to_string()
+        );
     }
 }

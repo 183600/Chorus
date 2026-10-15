@@ -2,8 +2,10 @@ use crate::config::{Config, ModelConfig, WorkflowModelTarget, WorkflowPlan, Work
 use crate::llm::{parse_temperature_from_response, ChatMessage, LLMClient};
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedSender, RwLock};
 use url::Url;
 
@@ -33,7 +35,6 @@ struct SelectedChoice {
     worker_name: String,
     response: String,
     reasoning: Option<String>,
-    raw_output: String,
 }
 
 #[derive(Debug, Clone)]
@@ -60,9 +61,30 @@ pub struct WorkflowExecutionDetails {
     pub synthesizer: Option<SynthesizerDetails>,
 }
 
+fn serialize_f32_as_f64<S>(value: &f32, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_f64(*value as f64)
+}
+
+fn serialize_optional_f32_as_f64<S>(
+    value: &Option<f32>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(inner) => serializer.serialize_some(&(*inner as f64)),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzerDetails {
     pub model: String,
+    #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
     pub auto_temperature: bool,
 }
@@ -70,6 +92,7 @@ pub struct AnalyzerDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDetails {
     pub name: String,
+    #[serde(serialize_with = "serialize_optional_f32_as_f64")]
     pub temperature: Option<f32>,
     pub response: Option<String>,
     pub success: bool,
@@ -80,6 +103,7 @@ pub struct WorkerDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectorDetails {
     pub model: String,
+    #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_index: Option<usize>,
@@ -99,13 +123,14 @@ pub struct SelectorDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SynthesizerDetails {
     pub model: String,
+    #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
 }
 
 pub struct WorkflowEngine {
     config: Config,
     model_configs: HashMap<String, ModelConfig>,
-    llm_clients: RwLock<HashMap<LlmClientCacheKey, LLMClient>>,
+    llm_clients: RwLock<HashMap<LlmClientCacheKey, Arc<LLMClient>>>,
 }
 
 impl WorkflowEngine {
@@ -151,23 +176,35 @@ impl WorkflowEngine {
         api_base: &str,
         api_key: &str,
         timeout_secs: u64,
-    ) -> Result<LLMClient> {
+    ) -> Result<Arc<LLMClient>> {
         let key = LlmClientCacheKey::new(api_base, api_key, timeout_secs);
 
         {
             let clients = self.llm_clients.read().await;
             if let Some(client) = clients.get(&key) {
-                return Ok(client.clone());
+                return Ok(Arc::clone(client));
             }
         }
 
-        let new_client = LLMClient::new(api_base.to_string(), api_key.to_string(), timeout_secs)?;
+        let new_client = Arc::new(LLMClient::new(
+            api_base.to_string(),
+            api_key.to_string(),
+            timeout_secs,
+        )?);
 
         let mut clients = self.llm_clients.write().await;
-        Ok(clients
-            .entry(key)
-            .or_insert_with(|| new_client.clone())
-            .clone())
+        Ok(Arc::clone(
+            clients.entry(key).or_insert_with(|| Arc::clone(&new_client)),
+        ))
+    }
+
+    fn effective_timeouts_for_api_base(&self, api_base: &str) -> crate::config::TimeoutConfig {
+        match Url::parse(api_base) {
+            Ok(url) => self
+                .config
+                .effective_timeouts_for_domain(url.host_str()),
+            Err(_) => self.config.effective_timeouts_for_domain(None),
+        }
     }
 
     #[async_recursion]
@@ -197,7 +234,7 @@ impl WorkflowEngine {
             .unwrap_or(false);
 
         let temperature = self
-            .resolve_analyzer_temperature(plan, prompt, depth)
+            .resolve_analyzer_temperature(plan, model_config, prompt, depth)
             .await?;
 
         let analyzer_details = AnalyzerDetails {
@@ -233,11 +270,11 @@ impl WorkflowEngine {
             );
         }
 
-        let worker_responses: Vec<(String, String)> = worker_details
+        let worker_responses: Vec<(&str, &str)> = worker_details
             .iter()
             .filter_map(|w| {
                 if w.success {
-                    w.response.as_ref().map(|r| (w.name.clone(), r.clone()))
+                    w.response.as_deref().map(|r| (w.name.as_str(), r))
                 } else {
                     None
                 }
@@ -427,11 +464,11 @@ impl WorkflowEngine {
     async fn resolve_analyzer_temperature(
         &self,
         plan: &WorkflowPlan,
+        model_config: &ModelConfig,
         prompt: &str,
         depth: usize,
     ) -> Result<f32> {
         let target = &plan.analyzer;
-        let model_config = self.lookup_model(&target.model)?;
 
         if let Some(explicit) = target.temperature.or(model_config.temperature) {
             if depth == 0 {
@@ -481,8 +518,7 @@ impl WorkflowEngine {
             );
         }
 
-        let domain = extract_domain_from_url(&model_config.api_base);
-        let timeouts = self.config.effective_timeouts_for_domain(domain.as_deref());
+        let timeouts = self.effective_timeouts_for_api_base(&model_config.api_base);
         let client = self
             .get_llm_client(
                 &model_config.api_base,
@@ -593,35 +629,37 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                         tracing::debug!("Calling worker model {} at depth {}", target.model, depth);
                     }
 
-                    let temperature = if let Ok(model_config) = self.lookup_model(&target.model) {
-                        self.resolve_worker_temperature(
-                            target,
-                            model_config,
-                            base_temperature,
-                            analyzer_auto,
-                        )
-                    } else {
-                        let err = self.lookup_model(&target.model);
-                        let err_display = err.expect_err("lookup should have failed").to_string();
-                        tracing::warn!(
-                            worker = %target.model,
-                            depth,
-                            error = %err_display,
-                            "Worker lookup failed"
-                        );
-                        worker_details.push(WorkerDetails {
-                            name: target.model.clone(),
-                            temperature: None,
-                            response: None,
-                            success: false,
-                            error: Some(err_display),
-                            nested: None,
-                        });
-                        continue;
+                    let model_config = match self.lookup_model(&target.model) {
+                        Ok(model_config) => model_config,
+                        Err(err) => {
+                            let err_display = err.to_string();
+                            tracing::warn!(
+                                worker = %target.model,
+                                depth,
+                                error = %err_display,
+                                "Worker lookup failed"
+                            );
+                            worker_details.push(WorkerDetails {
+                                name: target.model.clone(),
+                                temperature: None,
+                                response: None,
+                                success: false,
+                                error: Some(err_display),
+                                nested: None,
+                            });
+                            continue;
+                        }
                     };
 
+                    let temperature = self.resolve_worker_temperature(
+                        target,
+                        model_config,
+                        base_temperature,
+                        analyzer_auto,
+                    );
+
                     match self
-                        .call_worker_model(target, prompt, base_temperature, analyzer_auto, depth)
+                        .call_worker_model(target, model_config, temperature, prompt, depth)
                         .await
                     {
                         Ok(response) => {
@@ -736,15 +774,12 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
     async fn call_worker_model(
         &self,
         target: &WorkflowModelTarget,
+        model_config: &ModelConfig,
+        temperature: f32,
         prompt: &str,
-        base_temperature: f32,
-        analyzer_auto: bool,
         depth: usize,
     ) -> Result<String> {
-        let model_config = self.lookup_model(&target.model)?;
-
-        let domain = extract_domain_from_url(&model_config.api_base);
-        let timeouts = self.config.effective_timeouts_for_domain(domain.as_deref());
+        let timeouts = self.effective_timeouts_for_api_base(&model_config.api_base);
         let client = self
             .get_llm_client(
                 &model_config.api_base,
@@ -757,9 +792,6 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             role: "user".to_string(),
             content: prompt.to_string(),
         }];
-
-        let temperature =
-            self.resolve_worker_temperature(target, model_config, base_temperature, analyzer_auto);
 
         tracing::debug!(
             "Using temperature {} for worker {} at depth {}",
@@ -785,7 +817,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         &self,
         target: &WorkflowModelTarget,
         original_prompt: &str,
-        worker_responses: &[(String, String)],
+        worker_responses: &[(&str, &str)],
         depth: usize,
     ) -> (SelectorDetails, Option<SelectedChoice>) {
         if worker_responses.is_empty() {
@@ -839,8 +871,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
 
         let temperature = self.resolve_selector_temperature(target, model_config, depth);
 
-        let domain = extract_domain_from_url(&model_config.api_base);
-        let timeouts = self.config.effective_timeouts_for_domain(domain.as_deref());
+        let timeouts = self.effective_timeouts_for_api_base(&model_config.api_base);
         let client = match self
             .get_llm_client(
                 &model_config.api_base,
@@ -881,7 +912,13 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         for (i, (label, response)) in worker_responses.iter().enumerate() {
-            selector_prompt.push_str(&format!("【回答{}：{}】\n{}\n\n", i + 1, label, response));
+            let _ = write!(
+                selector_prompt,
+                "【回答{}：{}】\n{}\n\n",
+                i + 1,
+                label,
+                response
+            );
         }
 
         selector_prompt.push_str(
@@ -932,12 +969,11 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         match parse_selector_choice(&raw_output, worker_responses.len()) {
             Ok(parsed) => {
                 let worker_entry = &worker_responses[parsed.index - 1];
-                let worker_name = worker_entry.0.clone();
-                let worker_response = worker_entry.1.clone();
-                let reasoning = parsed.reasoning.clone();
+                let worker_name = worker_entry.0.to_string();
+                let worker_response = worker_entry.1.to_string();
+                let reasoning = parsed.reasoning;
                 let selected_response = parsed
                     .selected_response
-                    .clone()
                     .unwrap_or_else(|| worker_response.clone());
 
                 if depth == 0 {
@@ -966,7 +1002,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                     reasoning: reasoning.clone(),
                     success: true,
                     error: None,
-                    raw_output: Some(raw_output.clone()),
+                    raw_output: Some(raw_output),
                 };
 
                 let choice = SelectedChoice {
@@ -974,7 +1010,6 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                     worker_name,
                     response: worker_response,
                     reasoning,
-                    raw_output,
                 };
 
                 (details, Some(choice))
@@ -1009,15 +1044,14 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         &self,
         target: &WorkflowModelTarget,
         original_prompt: &str,
-        worker_responses: &[(String, String)],
+        worker_responses: &[(&str, &str)],
         selected_choice: Option<&SelectedChoice>,
         depth: usize,
         stream: Option<StreamCallback>,
     ) -> Result<(String, bool)> {
         let model_config = self.lookup_model(&target.model)?;
 
-        let domain = extract_domain_from_url(&model_config.api_base);
-        let timeouts = self.config.effective_timeouts_for_domain(domain.as_deref());
+        let timeouts = self.effective_timeouts_for_api_base(&model_config.api_base);
         let client = self
             .get_llm_client(
                 &model_config.api_base,
@@ -1032,7 +1066,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         for (i, (label, response)) in worker_responses.iter().enumerate() {
-            synthesis_prompt.push_str(&format!("【模型{}：{}】\n{}\n\n", i + 1, label, response));
+            let _ = write!(synthesis_prompt, "【模型{}：{}】\n{}\n\n", i + 1, label, response);
         }
 
         if let Some(choice) = selected_choice {
@@ -1172,12 +1206,6 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             )
         })
     }
-}
-
-fn extract_domain_from_url(url: &str) -> Option<String> {
-    Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()))
 }
 
 fn parse_selector_choice(response: &str, worker_count: usize) -> Result<ParsedSelection> {
@@ -1646,6 +1674,73 @@ mod tests {
             message.contains("no worker nodes configured"),
             "message did not explain worker misconfiguration: {}",
             message
+        );
+    }
+
+    #[test]
+    fn execution_detail_temperatures_serialize_like_value_path() {
+        let legacy_temperature = serde_json::json!({ "temperature": 1.4f32 })["temperature"].to_string();
+
+        let analyzer = AnalyzerDetails {
+            model: "m".to_string(),
+            temperature: 1.4,
+            auto_temperature: true,
+        };
+        let serialized = serde_json::to_string(&analyzer).unwrap();
+        assert!(
+            serialized.contains(&format!("\"temperature\":{}", legacy_temperature)),
+            "analyzer temperature serialized as {} (expected legacy {})",
+            serialized,
+            legacy_temperature
+        );
+
+        let synthesizer = SynthesizerDetails {
+            model: "m".to_string(),
+            temperature: 1.4,
+        };
+        let serialized = serde_json::to_string(&synthesizer).unwrap();
+        assert!(
+            serialized.contains(&format!("\"temperature\":{}", legacy_temperature)),
+            "synthesizer temperature serialized as {} (expected legacy {})",
+            serialized,
+            legacy_temperature
+        );
+
+        let selector = SelectorDetails {
+            model: "m".to_string(),
+            temperature: 1.4,
+            selected_index: None,
+            selected_worker: None,
+            selected_response: None,
+            reasoning: None,
+            success: true,
+            error: None,
+            raw_output: None,
+        };
+        let serialized = serde_json::to_string(&selector).unwrap();
+        assert!(
+            serialized.contains(&format!("\"temperature\":{}", legacy_temperature)),
+            "selector temperature serialized as {} (expected legacy {})",
+            serialized,
+            legacy_temperature
+        );
+
+        let legacy_worker_temperature =
+            serde_json::json!({ "temperature": 0.3f32 })["temperature"].to_string();
+        let worker = WorkerDetails {
+            name: "w".to_string(),
+            temperature: Some(0.3),
+            response: None,
+            success: true,
+            error: None,
+            nested: None,
+        };
+        let serialized = serde_json::to_string(&worker).unwrap();
+        assert!(
+            serialized.contains(&format!("\"temperature\":{}", legacy_worker_temperature)),
+            "worker temperature serialized as {} (expected legacy {})",
+            serialized,
+            legacy_worker_temperature
         );
     }
 
