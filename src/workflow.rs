@@ -6,7 +6,9 @@ use futures::stream::{self, StreamExt as _};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -127,6 +129,19 @@ pub struct SynthesizerDetails {
     pub model: String,
     #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Error returned by [`WorkflowEngine::call_synthesizer`].
+///
+/// `streamed` records whether any synthesizer output had already been forwarded
+/// to the caller before the failure. When `false`, the workflow may safely fall
+/// back to the selector/worker answer; when `true`, appending a different
+/// response would duplicate partial output, so the error is propagated.
+struct SynthesizerFailure {
+    error: anyhow::Error,
+    streamed: bool,
 }
 
 pub struct WorkflowEngine {
@@ -286,7 +301,7 @@ impl WorkflowEngine {
 
         let temperature = self
             .resolve_analyzer_temperature(plan, model_config, prompt, depth)
-            .await?;
+            .await;
 
         let analyzer_details = AnalyzerDetails {
             model: target.model.clone(),
@@ -353,14 +368,9 @@ impl WorkflowEngine {
                     depth,
                 );
 
-                let synthesizer_details = SynthesizerDetails {
-                    model: synthesizer_target.model.clone(),
-                    temperature: synthesizer_temperature,
-                };
-
                 let stream_for_synth = if depth == 0 { stream.clone() } else { None };
 
-                let (final_response, streamed) = self
+                match self
                     .call_synthesizer(
                         synthesizer_target,
                         prompt,
@@ -369,13 +379,48 @@ impl WorkflowEngine {
                         depth,
                         stream_for_synth,
                     )
-                    .await?;
-
-                if depth == 0 {
-                    top_level_streamed = streamed;
+                    .await
+                {
+                    Ok((final_response, streamed)) => {
+                        if depth == 0 {
+                            top_level_streamed = streamed;
+                        }
+                        (
+                            Some(SynthesizerDetails {
+                                model: synthesizer_target.model.clone(),
+                                temperature: synthesizer_temperature,
+                                error: None,
+                            }),
+                            final_response,
+                        )
+                    }
+                    Err(failure) if !failure.streamed => {
+                        tracing::warn!(
+                            synthesizer = %synthesizer_target.model,
+                            depth,
+                            error = %failure.error,
+                            "Synthesizer failed before producing output; falling back to the selector/worker answer"
+                        );
+                        match self.resolve_final_response_without_synthesizer(
+                            plan,
+                            &worker_details,
+                            selector_details.as_ref(),
+                            selected_choice.as_ref(),
+                            depth,
+                        ) {
+                            Ok(final_response) => (
+                                Some(SynthesizerDetails {
+                                    model: synthesizer_target.model.clone(),
+                                    temperature: synthesizer_temperature,
+                                    error: Some(failure.error.to_string()),
+                                }),
+                                final_response,
+                            ),
+                            Err(_) => return Err(failure.error),
+                        }
+                    }
+                    Err(failure) => return Err(failure.error),
                 }
-
-                (Some(synthesizer_details), final_response)
             } else {
                 let final_response = self.resolve_final_response_without_synthesizer(
                     plan,
@@ -518,7 +563,7 @@ impl WorkflowEngine {
         model_config: &ModelConfig,
         prompt: &str,
         depth: usize,
-    ) -> Result<f32> {
+    ) -> f32 {
         let target = &plan.analyzer;
 
         if let Some(explicit) = target.temperature.or(model_config.temperature) {
@@ -531,7 +576,7 @@ impl WorkflowEngine {
                     explicit
                 );
             }
-            return Ok(explicit);
+            return explicit;
         }
 
         let auto = target
@@ -552,7 +597,7 @@ impl WorkflowEngine {
                     DEFAULT_TEMPERATURE
                 );
             }
-            return Ok(DEFAULT_TEMPERATURE);
+            return DEFAULT_TEMPERATURE;
         }
 
         if depth == 0 {
@@ -570,13 +615,26 @@ impl WorkflowEngine {
         }
 
         let timeouts = self.effective_timeouts_for_api_base(&model_config.api_base);
-        let client = self
+        let client = match self
             .get_llm_client(
                 &model_config.api_base,
                 &model_config.api_key,
                 timeouts.analyzer_timeout_secs,
             )
-            .await?;
+            .await
+        {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(
+                    analyzer = %target.model,
+                    depth,
+                    error = %err,
+                    "Failed to prepare the auto-temperature probe client; using default temperature {}",
+                    DEFAULT_TEMPERATURE
+                );
+                return DEFAULT_TEMPERATURE;
+            }
+        };
 
         let analysis_prompt = format!(
             r#"请分析以下用户提示，并为其推荐一个合适的temperature参数（0.0-2.0之间的浮点数）。
@@ -593,9 +651,22 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             prompt
         );
 
-        let response = client
+        let response = match client
             .chat_completion_prompt(&target.model, &analysis_prompt, Some(0.3))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(
+                    analyzer = %target.model,
+                    depth,
+                    error = %err,
+                    "Auto-temperature probe failed; using default temperature {}",
+                    DEFAULT_TEMPERATURE
+                );
+                return DEFAULT_TEMPERATURE;
+            }
+        };
 
         let temperature = parse_temperature_from_response(&response);
         tracing::debug!(
@@ -606,7 +677,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             response
         );
 
-        Ok(temperature)
+        temperature
     }
 
     #[allow(dead_code)]
@@ -1120,8 +1191,13 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         selected_choice: Option<&SelectedChoice>,
         depth: usize,
         stream: Option<StreamCallback>,
-    ) -> Result<(String, bool)> {
-        let model_config = self.lookup_model(&target.model)?;
+    ) -> std::result::Result<(String, bool), SynthesizerFailure> {
+        let model_config = self
+            .lookup_model(&target.model)
+            .map_err(|error| SynthesizerFailure {
+                error,
+                streamed: false,
+            })?;
 
         let timeouts = self.effective_timeouts_for_api_base(&model_config.api_base);
         let client = self
@@ -1130,7 +1206,11 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                 &model_config.api_key,
                 timeouts.synthesizer_timeout_secs,
             )
-            .await?;
+            .await
+            .map_err(|error| SynthesizerFailure {
+                error,
+                streamed: false,
+            })?;
 
         let prompt_capacity = original_prompt.len()
             + 240
@@ -1190,16 +1270,48 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             depth
         );
 
+        let (synth_stream, streamed_flag, forwarder) = match stream {
+            Some(sender) => {
+                let (tracked_tx, mut tracked_rx) = mpsc::unbounded_channel::<String>();
+                let streamed = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&streamed);
+                let handle = tokio::spawn(async move {
+                    while let Some(chunk) = tracked_rx.recv().await {
+                        flag.store(true, Ordering::SeqCst);
+                        if sender.send(chunk).is_err() {
+                            break;
+                        }
+                    }
+                });
+                (Some(tracked_tx), Some(streamed), Some(handle))
+            }
+            None => (None, None, None),
+        };
+
         let completion = client
             .chat_completion_prompt_with_stream(
                 &target.model,
                 &synthesis_prompt,
                 Some(temperature),
-                stream,
+                synth_stream,
             )
-            .await?;
+            .await;
 
-        Ok((completion.content, completion.streamed))
+        // Drain the forwarder so `streamed_flag` reflects every chunk that was
+        // produced before the call finished, whether it succeeded or failed.
+        if let Some(handle) = forwarder {
+            let _ = handle.await;
+        }
+
+        match completion {
+            Ok(completion) => Ok((completion.content, completion.streamed)),
+            Err(error) => Err(SynthesizerFailure {
+                streamed: streamed_flag
+                    .map(|flag| flag.load(Ordering::SeqCst))
+                    .unwrap_or(false),
+                error,
+            }),
+        }
     }
 
     fn resolve_worker_temperature(
@@ -1791,6 +1903,7 @@ mod tests {
         let synthesizer = SynthesizerDetails {
             model: "m".to_string(),
             temperature: 1.4,
+            error: None,
         };
         let serialized = serde_json::to_string(&synthesizer).unwrap();
         assert!(
@@ -2166,6 +2279,337 @@ mod tests {
             probe.calls.load(Ordering::SeqCst),
             2,
             "expected one failed attempt plus one successful retry"
+        );
+    }
+
+    fn build_stage_test_config(
+        api_base: &str,
+        analyzer: &str,
+        workers: &[&str],
+        selector: Option<&str>,
+        synthesizer: Option<&str>,
+    ) -> Config {
+        let mut model_names: Vec<&str> = vec![analyzer];
+        for name in workers.iter().copied().chain(selector).chain(synthesizer) {
+            if !model_names.contains(&name) {
+                model_names.push(name);
+            }
+        }
+
+        let models = model_names
+            .iter()
+            .map(|name| ModelConfig {
+                name: (*name).to_string(),
+                api_base: api_base.to_string(),
+                api_key: "sk-test".to_string(),
+                temperature: Some(0.5),
+                auto_temperature: None,
+            })
+            .collect();
+
+        let target = |name: &str| WorkflowModelTarget {
+            model: name.to_string(),
+            temperature: Some(0.5),
+            auto_temperature: None,
+        };
+
+        Config {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+            },
+            models,
+            workflow_integration: WorkflowPlan {
+                analyzer: target(analyzer),
+                workers: workers
+                    .iter()
+                    .map(|name| WorkflowWorker::Model(target(name)))
+                    .collect(),
+                selector: selector.map(target),
+                synthesizer: synthesizer.map(target),
+                nested_worker_depth: None,
+            },
+            workflow: WorkflowConfig {
+                timeouts: TimeoutConfig {
+                    analyzer_timeout_secs: 5,
+                    worker_timeout_secs: 5,
+                    synthesizer_timeout_secs: 5,
+                },
+                domains: HashMap::new(),
+                worker_concurrency: None,
+                retry: RetryConfig {
+                    max_retries: 0,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+            },
+        }
+    }
+
+    async fn stage_probe_handler(Json(body): Json<Value>) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+
+        if model.starts_with("broken") {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "upstream exploded",
+            )
+                .into_response();
+        }
+
+        if model == "selector" {
+            return Json(json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "{\"selected_index\": 1, \"reasoning\": \"best answer\"}"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .into_response();
+        }
+
+        Json(json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": format!("answer-from-{}", model)
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .into_response()
+    }
+
+    async fn spawn_stage_probe() -> String {
+        let app = Router::new().route("/v1/chat/completions", post(stage_probe_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{}/v1", port)
+    }
+
+    #[tokio::test]
+    async fn successful_synthesizer_records_no_error() {
+        let api_base = spawn_stage_probe().await;
+        let config = build_stage_test_config(
+            &api_base,
+            "worker",
+            &["worker"],
+            Some("selector"),
+            Some("synth_ok"),
+        );
+        let engine = WorkflowEngine::new(config);
+
+        let result = engine
+            .process_with_details("hello".to_string())
+            .await
+            .expect("the pipeline should succeed");
+
+        assert_eq!(result.final_response, "answer-from-synth_ok");
+        let details = &result.execution_details;
+        assert!(details.workers[0].success);
+        let selector = details.selector.as_ref().expect("selector details");
+        assert!(selector.success, "selector error: {:?}", selector.error);
+        let synthesizer = details.synthesizer.as_ref().expect("synthesizer details");
+        assert_eq!(synthesizer.model, "synth_ok");
+        assert_eq!(
+            synthesizer.error, None,
+            "a successful synthesizer must not record an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthesizer_failure_falls_back_to_worker_response() {
+        let api_base = spawn_stage_probe().await;
+        let config = build_stage_test_config(
+            &api_base,
+            "worker",
+            &["worker"],
+            Some("selector"),
+            Some("broken_synth"),
+        );
+        let engine = WorkflowEngine::new(config);
+
+        let result = engine
+            .process_with_details("hello".to_string())
+            .await
+            .expect("a failed synthesizer must not fail the whole request");
+
+        assert_eq!(result.final_response, "answer-from-worker");
+        let details = &result.execution_details;
+        assert!(details.workers[0].success);
+        let selector = details.selector.as_ref().expect("selector details");
+        assert!(selector.success, "selector error: {:?}", selector.error);
+        assert_eq!(selector.selected_worker.as_deref(), Some("worker"));
+
+        let synthesizer = details.synthesizer.as_ref().expect("synthesizer details");
+        assert_eq!(synthesizer.model, "broken_synth");
+        let error = synthesizer
+            .error
+            .as_deref()
+            .expect("the synthesizer failure should be recorded");
+        assert!(
+            error.contains("500"),
+            "error should mention the upstream status: {}",
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn analyzer_auto_temperature_probe_failure_falls_back_to_default() {
+        let api_base = spawn_stage_probe().await;
+        let mut config =
+            build_stage_test_config(&api_base, "broken_analyzer", &["worker"], None, None);
+
+        let analyzer_index = config
+            .models
+            .iter()
+            .position(|model| model.name == "broken_analyzer")
+            .expect("analyzer model present");
+        config.models[analyzer_index].temperature = None;
+        config.models[analyzer_index].auto_temperature = Some(true);
+        config.workflow_integration.analyzer.temperature = None;
+        config.workflow_integration.analyzer.auto_temperature = Some(true);
+
+        let engine = WorkflowEngine::new(config);
+        let result = engine
+            .process_with_details("hello".to_string())
+            .await
+            .expect("a failed auto-temperature probe must not fail the request");
+
+        assert_eq!(result.final_response, "answer-from-worker");
+        let analyzer = &result.execution_details.analyzer;
+        assert_eq!(analyzer.model, "broken_analyzer");
+        assert!(analyzer.auto_temperature);
+        assert_eq!(
+            analyzer.temperature, DEFAULT_TEMPERATURE,
+            "probe failure should fall back to the default temperature"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_synthesizer_failure_falls_back_before_first_token() {
+        let api_base = spawn_stage_probe().await;
+        let config = build_stage_test_config(
+            &api_base,
+            "worker",
+            &["worker"],
+            None,
+            Some("broken_synth"),
+        );
+        let engine = WorkflowEngine::new(config);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let response = engine
+            .process_with_stream("hello".to_string(), Some(tx))
+            .await
+            .expect("a synthesizer failing before any token must fall back");
+
+        assert_eq!(response, "answer-from-worker");
+
+        let mut streamed = Vec::new();
+        while let Ok(piece) = rx.try_recv() {
+            streamed.push(piece);
+        }
+        assert_eq!(
+            streamed,
+            vec!["answer-from-worker".to_string()],
+            "the fallback answer must be delivered exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_synthesizer_failure_after_partial_output_is_propagated() {
+        use axum::body::Body;
+        use axum::http::header;
+        use axum::response::IntoResponse;
+        use bytes::Bytes;
+
+        async fn aborting_handler(Json(body): Json<Value>) -> axum::response::Response {
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+
+            if model == "broken_synth" {
+                let first = futures::stream::once(async {
+                    Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+                    ))
+                });
+                let abort = futures::stream::once(async {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err::<Bytes, std::io::Error>(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "upstream aborted",
+                    ))
+                });
+                return axum::response::Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(futures::StreamExt::chain(first, abort)))
+                    .unwrap();
+            }
+
+            Json(json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": format!("answer-from-{}", model)
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .into_response()
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(aborting_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let config = build_stage_test_config(
+            &format!("http://127.0.0.1:{}/v1", port),
+            "worker",
+            &["worker"],
+            None,
+            Some("broken_synth"),
+        );
+        let engine = WorkflowEngine::new(config);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let err = engine
+            .process_with_stream("hello".to_string(), Some(tx))
+            .await
+            .expect_err("a failure after partial output must not be replaced by a fallback");
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("abort")
+                || err.to_string().contains("error"),
+            "unexpected error: {}",
+            err
+        );
+
+        let mut streamed = Vec::new();
+        while let Ok(piece) = rx.try_recv() {
+            streamed.push(piece);
+        }
+        assert_eq!(
+            streamed,
+            vec!["partial".to_string()],
+            "partial output must be preserved and never followed by a fallback answer"
         );
     }
 }
