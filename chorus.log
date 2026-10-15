@@ -1,6 +1,0 @@
-[2m2025-12-01T09:44:05.939878Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Chorus LLM API Aggregation Service starting
-[2m2025-12-01T09:44:05.940139Z[0m [32m INFO[0m [2mchorus::config[0m[2m:[0m Loading configuration from: /home/qwe12345678/github/chorus/test-config.toml
-[2m2025-12-01T09:44:05.940934Z[0m [34mDEBUG[0m [2mchorus::config[0m[2m:[0m Workflow validation passed
-[2m2025-12-01T09:44:05.940975Z[0m [34mDEBUG[0m [2mchorus::config[0m[2m:[0m Configuration loaded successfully: Config { server: ServerConfig { host: "127.0.0.1", port: 11435 }, model: [ModelConfig { name: "test-model", api_base: "http://localhost:11434", api_key: "ollama", auto_temperature: true, temperature: None }], workflow_integration: WorkflowIntegrationConfig { nested_worker_depth: 1, json: "{\n  \"analyzer\": {\"ref\": \"test-model\"},\n  \"workers\": [\n    {\"ref\": \"test-model\", \"temperature\": 1.4}\n  ],\n  \"selector\": {\"ref\": \"test-model\"},\n  \"synthesizer\": {\"ref\": \"test-model\"}\n}\n" }, workflow: WorkflowConfig { timeouts: WorkflowTimeouts { analyzer_timeout_secs: 30, worker_timeout_secs: 60, synthesizer_timeout_secs: 60 }, domains: {} } }
-[2m2025-12-01T09:44:05.941023Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Binding to 127.0.0.1:11435
-Error: Os { code: 98, kind: AddrInUse, message: "Address already in use" }
