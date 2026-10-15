@@ -2,8 +2,9 @@ use crate::config::Config;
 use crate::workflow::{StreamCallback, WorkflowEngine, WorkflowExecutionDetails};
 use anyhow::Result;
 use axum::{
-    extract::State,
-    http::{header, HeaderValue, StatusCode},
+    extract::{Request, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
@@ -434,13 +435,29 @@ pub async fn start_server(config: Arc<Config>) -> Result<()> {
         "version": "0.1.0"
     }))?);
 
+    if config.server.api_key.is_some() {
+        tracing::info!("API key authentication is enabled for /api and /v1 endpoints");
+    }
+
     let state = Arc::new(AppState {
         config,
         workflow_engine,
         health_body,
     });
 
-    let app = Router::new()
+    let app = build_router(state);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    tracing::info!("Chorus server listening on http://{}", addr);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+fn build_router(state: SharedState) -> Router {
+    Router::new()
         .route("/", get(health_check))
         // API v0 style
         .route("/api/generate", post(generate))
@@ -455,16 +472,95 @@ pub async fn start_server(config: Arc<Config>) -> Result<()> {
         .route("/v1/models", get(list_models_openai))
         .route("/v1/tags", get(list_models))
         .route("/v1/responses", post(responses))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_api_key,
+        ))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state)
+}
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+/// Rejects requests without a valid key when `[server].api_key` (or the
+/// `CHORUS_API_KEY` override) is set. The health probe at `/` and CORS
+/// preflight requests stay public.
+async fn require_api_key(
+    State(state): State<SharedState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(expected) = state.config.server.api_key.as_deref() else {
+        return next.run(request).await;
+    };
 
-    tracing::info!("Chorus server listening on http://{}", addr);
+    if request.uri().path() == "/" || request.method() == Method::OPTIONS {
+        return next.run(request).await;
+    }
 
-    axum::serve(listener, app).await?;
+    let authorized = extract_api_key(request.headers())
+        .map(|provided| constant_time_eq(provided.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false);
 
-    Ok(())
+    if authorized {
+        next.run(request).await
+    } else {
+        unauthorized_response()
+    }
+}
+
+fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
+    if let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Some(token) = bearer_token(value) {
+            return Some(token);
+        }
+    }
+
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.trim().split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
+    if provided.len() != expected.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in provided.iter().zip(expected.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+fn unauthorized_response() -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "error": "Unauthorized: supply the configured API key via `Authorization: Bearer <key>` or the `x-api-key` header."
+        })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer"),
+    );
+    response
 }
 
 async fn health_check(State(state): State<SharedState>) -> Response {
@@ -2017,5 +2113,206 @@ where
 {
     fn from(err: E) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, err)
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use crate::config::{
+        ModelConfig, ServerConfig, TimeoutConfig, WorkflowConfig, WorkflowModelTarget,
+        WorkflowPlan, WorkflowWorker,
+    };
+    use std::collections::HashMap;
+
+    fn test_config(api_key: Option<&str>) -> Config {
+        let target = |name: &str| WorkflowModelTarget {
+            model: name.to_string(),
+            temperature: None,
+            auto_temperature: None,
+        };
+
+        Config {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                api_key: api_key.map(str::to_string),
+            },
+            models: vec![ModelConfig {
+                name: "m1".to_string(),
+                api_base: "http://127.0.0.1:1/v1".to_string(),
+                api_key: "upstream-key".to_string(),
+                temperature: None,
+                auto_temperature: None,
+            }],
+            workflow_integration: WorkflowPlan {
+                analyzer: target("m1"),
+                workers: vec![WorkflowWorker::Model(target("m1"))],
+                synthesizer: Some(target("m1")),
+                selector: None,
+                nested_worker_depth: None,
+            },
+            workflow: WorkflowConfig {
+                timeouts: TimeoutConfig {
+                    analyzer_timeout_secs: 5,
+                    worker_timeout_secs: 5,
+                    synthesizer_timeout_secs: 5,
+                },
+                domains: HashMap::new(),
+                worker_concurrency: None,
+                retry: Default::default(),
+            },
+        }
+    }
+
+    async fn spawn_test_server(api_key: Option<&str>) -> String {
+        let config = Arc::new(test_config(api_key));
+        let state = Arc::new(AppState {
+            workflow_engine: WorkflowEngine::from_shared(Arc::clone(&config)),
+            config,
+            health_body: Bytes::from_static(b"{\"status\":\"ok\"}"),
+        });
+        let router = build_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        format!("http://{}", addr)
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
+    #[tokio::test]
+    async fn requests_are_allowed_when_no_api_key_is_configured() {
+        let base = spawn_test_server(None).await;
+
+        let tags = client()
+            .get(format!("{}/api/tags", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(tags.status(), 200);
+
+        let models = client()
+            .get(format!("{}/v1/models", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(models.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn api_routes_require_the_configured_key() {
+        let base = spawn_test_server(Some("top-secret")).await;
+        let url = format!("{}/api/tags", base);
+
+        let missing = client().get(&url).send().await.unwrap();
+        assert_eq!(missing.status(), 401);
+        assert_eq!(
+            missing
+                .headers()
+                .get("www-authenticate")
+                .expect("missing WWW-Authenticate header"),
+            "Bearer"
+        );
+
+        let wrong = client()
+            .get(&url)
+            .header("Authorization", "Bearer nope")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), 401);
+
+        let bearer = client()
+            .get(&url)
+            .header("Authorization", "Bearer top-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bearer.status(), 200);
+
+        let lowercase_scheme = client()
+            .get(&url)
+            .header("Authorization", "bearer top-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(lowercase_scheme.status(), 200);
+
+        let x_api_key = client()
+            .get(&url)
+            .header("x-api-key", "top-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(x_api_key.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_stays_public_when_auth_is_enabled() {
+        let base = spawn_test_server(Some("top-secret")).await;
+
+        let response = client().get(format!("{}/", base)).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_is_not_blocked_by_auth() {
+        let base = spawn_test_server(Some("top-secret")).await;
+
+        let response = client()
+            .request(reqwest::Method::OPTIONS, format!("{}/api/chat", base))
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "authorization,content-type")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        assert!(response
+            .headers()
+            .contains_key("access-control-allow-origin"));
+    }
+
+    #[tokio::test]
+    async fn invalid_credentials_are_rejected_before_running_the_workflow() {
+        let base = spawn_test_server(Some("top-secret")).await;
+
+        let response = client()
+            .post(format!("{}/api/generate", base))
+            .json(&serde_json::json!({"model": "chorus", "prompt": "hi"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body.get("error").is_some());
+    }
+
+    #[test]
+    fn constant_time_equality_matches_plain_comparison() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(constant_time_eq(b"", b""));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"", b"a"));
+    }
+
+    #[test]
+    fn bearer_token_parsing_is_case_insensitive_and_strict() {
+        assert_eq!(bearer_token("Bearer secret"), Some("secret"));
+        assert_eq!(bearer_token("bearer secret"), Some("secret"));
+        assert_eq!(bearer_token("BEARER  secret "), Some("secret"));
+        assert_eq!(bearer_token("Basic secret"), None);
+        assert_eq!(bearer_token("Bearer"), None);
+        assert_eq!(bearer_token("Bearer   "), None);
     }
 }

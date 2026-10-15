@@ -161,6 +161,28 @@ pub struct Config {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+/// Environment variable that overrides `[server].api_key` when it is set to a
+/// non-empty value. Keeping the secret in the environment avoids storing it in
+/// the config file.
+pub const API_KEY_ENV_VAR: &str = "CHORUS_API_KEY";
+
+fn normalize_api_key(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Resolves the effective API key. An explicitly set environment variable wins
+/// over the config file; blank values (e.g. `CHORUS_API_KEY=""`) fall back to
+/// the file value so they can be used to disable an accidental override.
+pub(crate) fn resolve_api_key(
+    file_value: Option<String>,
+    env_value: Option<String>,
+) -> Option<String> {
+    normalize_api_key(env_value).or_else(|| normalize_api_key(file_value))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -724,8 +746,10 @@ impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path))?;
-        let cfg: Config = toml::from_str(&content)
+        let mut cfg: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse TOML from {}", path))?;
+        cfg.server.api_key =
+            resolve_api_key(cfg.server.api_key.take(), env::var(API_KEY_ENV_VAR).ok());
         Ok(cfg)
     }
 

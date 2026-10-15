@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::config::{Config, WorkflowWorker};
+    use crate::config::{resolve_api_key, Config, WorkflowWorker};
 
     const CFG_LEGACY: &str = r#"
 [server]
@@ -1747,5 +1747,124 @@ synthesizer_timeout_secs = 90
             WorkflowWorker::Model(target) => assert_eq!(target.model, "m1"),
             _ => panic!("table depth must take precedence over embedded depth"),
         }
+    }
+
+    #[test]
+    fn server_api_key_parses_and_defaults_to_none() {
+        const CFG_WITH_KEY: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+api_key = "top-secret"
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+json = """{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"}
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
+        let cfg: Config = toml::from_str(CFG_WITH_KEY).unwrap();
+        assert_eq!(cfg.server.api_key.as_deref(), Some("top-secret"));
+
+        let cfg: Config = toml::from_str(CFG_LEGACY).unwrap();
+        assert_eq!(cfg.server.api_key, None);
+    }
+
+    #[test]
+    fn api_key_resolution_prefers_env_and_normalizes_whitespace() {
+        assert_eq!(
+            resolve_api_key(Some("file-secret".into()), Some("env-secret".into())),
+            Some("env-secret".to_string())
+        );
+        assert_eq!(
+            resolve_api_key(Some("file-secret".into()), None),
+            Some("file-secret".to_string())
+        );
+        assert_eq!(
+            resolve_api_key(None, Some("env-secret".into())),
+            Some("env-secret".to_string())
+        );
+        assert_eq!(
+            resolve_api_key(Some("file-secret".into()), Some("   ".into())),
+            Some("file-secret".to_string())
+        );
+        assert_eq!(
+            resolve_api_key(Some("  padded  ".into()), None),
+            Some("padded".to_string())
+        );
+        assert_eq!(
+            resolve_api_key(None, Some("\n env \n".into())),
+            Some("env".to_string())
+        );
+        assert_eq!(resolve_api_key(None, None), None);
+        assert_eq!(
+            resolve_api_key(Some(String::new()), Some(String::new())),
+            None
+        );
+    }
+
+    #[test]
+    fn migration_preserves_server_api_key() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "chorus_api_key_migration_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.toml");
+
+        let config_content = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+api_key = "file-secret"
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+analyzer_model = "m1"
+worker_models = ["m1"]
+synthesizer_model = "m1"
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+        fs::write(&config_path, config_content).unwrap();
+
+        Config::migrate_config_if_needed(&config_path).unwrap();
+
+        let migrated = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            migrated.contains("api_key = \"file-secret\""),
+            "migrated config should keep the server API key, got:\n{}",
+            migrated
+        );
+
+        let cfg = Config::load(&config_path.to_string_lossy()).unwrap();
+        assert!(cfg.server.api_key.is_some());
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

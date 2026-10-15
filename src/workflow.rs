@@ -1650,6 +1650,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 11435,
+                api_key: None,
             },
             models: vec![ModelConfig {
                 name: "primary".to_string(),
@@ -2061,6 +2062,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 0,
+                api_key: None,
             },
             models,
             workflow_integration: WorkflowPlan {
@@ -2301,6 +2303,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 0,
+                api_key: None,
             },
             models,
             workflow_integration: WorkflowPlan {
