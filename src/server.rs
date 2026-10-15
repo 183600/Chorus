@@ -28,7 +28,7 @@ type SharedState = Arc<AppState>;
 const STREAM_CHUNK_SIZE: usize = 120;
 
 pub struct AppState {
-    config: Config,
+    config: Arc<Config>,
     workflow_engine: WorkflowEngine,
 }
 
@@ -98,12 +98,12 @@ pub struct ChatResponse {
     pub workflow: Option<WorkflowExecutionDetails>,
 }
 
-fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
+fn for_each_chunk(content: &str, max_len: usize, mut emit: impl FnMut(&str)) {
     if content.is_empty() {
-        return vec![String::new()];
+        emit("");
+        return;
     }
 
-    let mut chunks = Vec::new();
     let mut start = 0usize;
     let mut current_len = 0usize;
 
@@ -112,21 +112,41 @@ fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
 
         if ch == '\n' || current_len >= max_len {
             let end = idx + ch.len_utf8();
-            chunks.push(content[start..end].to_string());
+            emit(&content[start..end]);
             start = end;
             current_len = 0;
         }
     }
 
     if start < content.len() {
-        chunks.push(content[start..].to_string());
+        emit(&content[start..]);
     }
+}
 
+#[cfg(test)]
+fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    for_each_chunk(content, max_len, |piece| chunks.push(piece.to_string()));
     chunks
 }
 
+fn chunk_events<F>(segment: &str, mut make_event: F) -> Vec<Result<Event, Infallible>>
+where
+    F: FnMut(&str) -> Result<Event, Infallible>,
+{
+    let mut events = Vec::new();
+    for_each_chunk(segment, STREAM_CHUNK_SIZE, |piece| {
+        events.push(make_event(piece));
+    });
+    events
+}
+
 fn build_prompt_from_messages(messages: &[Message]) -> String {
-    let mut prompt = String::new();
+    let capacity = messages
+        .iter()
+        .map(|message| message.role.len() + message.content.len() + 3)
+        .sum();
+    let mut prompt = String::with_capacity(capacity);
     for (index, message) in messages.iter().enumerate() {
         if index > 0 {
             prompt.push('\n');
@@ -320,10 +340,11 @@ fn insert_workflow_field(
 }
 
 pub async fn start_server(config: Arc<Config>) -> Result<()> {
-    let workflow_engine = WorkflowEngine::new((*config).clone());
+    let workflow_engine = WorkflowEngine::from_shared(Arc::clone(&config));
+    let addr = format!("{}:{}", config.server.host, config.server.port);
 
     let state = Arc::new(AppState {
-        config: (*config).clone(),
+        config,
         workflow_engine,
     });
 
@@ -344,8 +365,6 @@ pub async fn start_server(config: Arc<Config>) -> Result<()> {
         .route("/v1/responses", post(responses))
         .layer(CorsLayer::permissive())
         .with_state(state);
-
-    let addr = format!("{}:{}", config.server.host, config.server.port);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
@@ -409,19 +428,16 @@ async fn generate(
                 move |segment| {
                     let model_name = Arc::clone(&model_name);
                     let created_at = Arc::clone(&created_at);
-                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
-                    stream::iter(pieces.into_iter().map(
-                        move |piece| -> Result<Event, Infallible> {
-                            Ok(Event::default()
-                                .json_data(GenerateStreamChunk {
-                                    created_at: &created_at,
-                                    done: false,
-                                    model: &model_name,
-                                    response: piece.as_str(),
-                                })
-                                .unwrap())
-                        },
-                    ))
+                    stream::iter(chunk_events(&segment, move |piece| {
+                        Ok(Event::default()
+                            .json_data(GenerateStreamChunk {
+                                created_at: &created_at,
+                                done: false,
+                                model: &model_name,
+                                response: piece,
+                            })
+                            .unwrap())
+                    }))
                 }
             });
 
@@ -521,22 +537,19 @@ async fn chat(
                 move |segment| {
                     let model_name = Arc::clone(&model_name);
                     let created_at = Arc::clone(&created_at);
-                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
-                    stream::iter(pieces.into_iter().map(
-                        move |piece| -> Result<Event, Infallible> {
-                            Ok(Event::default()
-                                .json_data(ChatStreamChunk {
-                                    created_at: &created_at,
-                                    done: false,
-                                    message: ChatStreamMessage {
-                                        content: piece.as_str(),
-                                        role: "assistant",
-                                    },
-                                    model: &model_name,
-                                })
-                                .unwrap())
-                        },
-                    ))
+                    stream::iter(chunk_events(&segment, move |piece| {
+                        Ok(Event::default()
+                            .json_data(ChatStreamChunk {
+                                created_at: &created_at,
+                                done: false,
+                                message: ChatStreamMessage {
+                                    content: piece,
+                                    role: "assistant",
+                                },
+                                model: &model_name,
+                            })
+                            .unwrap())
+                    }))
                 }
             });
 
@@ -671,26 +684,21 @@ async fn openai_chat_completions(
                 move |segment| {
                     let id = Arc::clone(&id);
                     let model_name = Arc::clone(&model_name);
-                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
-                    stream::iter(pieces.into_iter().map(
-                        move |piece| -> Result<Event, Infallible> {
-                            Ok(Event::default()
-                                .json_data(OpenAiChatStreamChunk {
-                                    choices: [OpenAiChatChoice {
-                                        delta: OpenAiDeltaContent {
-                                            content: piece.as_str(),
-                                        },
-                                        finish_reason: None,
-                                        index: 0,
-                                    }],
-                                    created,
-                                    id: &id,
-                                    model: &model_name,
-                                    object: "chat.completion.chunk",
-                                })
-                                .unwrap())
-                        },
-                    ))
+                    stream::iter(chunk_events(&segment, move |piece| {
+                        Ok(Event::default()
+                            .json_data(OpenAiChatStreamChunk {
+                                choices: [OpenAiChatChoice {
+                                    delta: OpenAiDeltaContent { content: piece },
+                                    finish_reason: None,
+                                    index: 0,
+                                }],
+                                created,
+                                id: &id,
+                                model: &model_name,
+                                object: "chat.completion.chunk",
+                            })
+                            .unwrap())
+                    }))
                 }
             });
 
@@ -825,25 +833,22 @@ async fn openai_completions(
                 move |segment| {
                     let id = Arc::clone(&id);
                     let model_name = Arc::clone(&model_name);
-                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
-                    stream::iter(pieces.into_iter().map(
-                        move |piece| -> Result<Event, Infallible> {
-                            Ok(Event::default()
-                                .json_data(OpenAiCompletionStreamChunk {
-                                    choices: [OpenAiCompletionChoice {
-                                        finish_reason: None,
-                                        index: 0,
-                                        logprobs: None,
-                                        text: piece.as_str(),
-                                    }],
-                                    created,
-                                    id: &id,
-                                    model: &model_name,
-                                    object: "text_completion",
-                                })
-                                .unwrap())
-                        },
-                    ))
+                    stream::iter(chunk_events(&segment, move |piece| {
+                        Ok(Event::default()
+                            .json_data(OpenAiCompletionStreamChunk {
+                                choices: [OpenAiCompletionChoice {
+                                    finish_reason: None,
+                                    index: 0,
+                                    logprobs: None,
+                                    text: piece,
+                                }],
+                                created,
+                                id: &id,
+                                model: &model_name,
+                                object: "text_completion",
+                            })
+                            .unwrap())
+                    }))
                 }
             });
 
@@ -1190,27 +1195,24 @@ async fn responses(
                     let resp_id = Arc::clone(&resp_id);
                     let model_name = Arc::clone(&model_name);
                     let content_index = Arc::clone(&content_index);
-                    let pieces = chunk_text(&segment, STREAM_CHUNK_SIZE);
-                    stream::iter(pieces.into_iter().map(
-                        move |piece| -> Result<Event, Infallible> {
-                            let index = content_index.fetch_add(1, Ordering::SeqCst);
-                            Ok(Event::default()
-                                .event("response.output_text.delta")
-                                .json_data(ResponsesDeltaChunk {
-                                    content_index: index,
-                                    created,
-                                    delta: ResponsesDelta {
-                                        text: piece.as_str(),
-                                        kind: "output_text.delta",
-                                    },
-                                    id: &resp_id,
-                                    model: &model_name,
-                                    object: "response.output_text.delta",
-                                    output_index: 0,
-                                })
-                                .unwrap())
-                        },
-                    ))
+                    stream::iter(chunk_events(&segment, move |piece| {
+                        let index = content_index.fetch_add(1, Ordering::Relaxed);
+                        Ok(Event::default()
+                            .event("response.output_text.delta")
+                            .json_data(ResponsesDeltaChunk {
+                                content_index: index,
+                                created,
+                                delta: ResponsesDelta {
+                                    text: piece,
+                                    kind: "output_text.delta",
+                                },
+                                id: &resp_id,
+                                model: &model_name,
+                                object: "response.output_text.delta",
+                                output_index: 0,
+                            })
+                            .unwrap())
+                    }))
                 }
             });
 

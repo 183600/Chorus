@@ -23,16 +23,19 @@ async fn main() -> Result<()> {
 
     // 自动加载配置（env > ~/.config/chorus/config.toml）
     let config = config::Config::load_auto()?;
-    let host = config.server.host.clone();
-    let port = config.server.port;
-    let worker_labels = config.workflow_integration.worker_labels();
 
-    tracing::info!("Starting Chorus server on {}:{}", host, port);
+    tracing::info!(
+        "Starting Chorus server on {}:{}",
+        config.server.host,
+        config.server.port
+    );
     tracing::info!(
         "Analyzer model: {}",
         config.workflow_integration.analyzer.model
     );
-    tracing::info!("Worker nodes: {:?}", worker_labels);
+    if tracing::enabled!(tracing::Level::INFO) {
+        tracing::info!("Worker nodes: {:?}", config.workflow_integration.worker_labels());
+    }
     if let Some(synth) = &config.workflow_integration.synthesizer {
         tracing::info!("Synthesizer model: {}", synth.model);
     } else if let Some(selector) = &config.workflow_integration.selector {

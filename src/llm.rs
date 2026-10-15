@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -109,7 +110,9 @@ impl LLMClient {
             self.chat_completions_url,
             model
         );
-        tracing::debug!("Request body: {}", serde_json::to_string_pretty(&request)?);
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!("Request body: {}", serde_json::to_string_pretty(&request)?);
+        }
 
         let response = self
             .client
@@ -219,12 +222,12 @@ impl LLMClient {
                         if let Some(text) = extract_stream_content(&value)
                             .or_else(|| extract_completion_text(&value))
                         {
-                            if let Some(sender) = stream.as_ref() {
-                                let _ = sender.send(text.clone());
-                            }
                             if !text.is_empty() {
                                 final_text.push_str(&text);
                                 streamed = true;
+                            }
+                            if let Some(sender) = stream.as_ref() {
+                                let _ = sender.send(text);
                             }
                         }
 
@@ -386,60 +389,50 @@ fn extract_stream_content(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn normalize_content_value(value: &serde_json::Value) -> Option<String> {
+fn append_content_value(value: &serde_json::Value, out: &mut String) {
     match value {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(s) => {
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            }
+        serde_json::Value::Null => {}
+        serde_json::Value::String(s) => out.push_str(s),
+        serde_json::Value::Number(n) => {
+            let _ = write!(out, "{}", n);
         }
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         serde_json::Value::Array(items) => {
-            let mut out = String::new();
             for item in items {
-                if let Some(piece) = normalize_content_value(item) {
-                    out.push_str(&piece);
-                }
-            }
-            if out.is_empty() {
-                None
-            } else {
-                Some(out)
+                append_content_value(item, out);
             }
         }
         serde_json::Value::Object(map) => {
             for key in ["text", "content", "value", "message"] {
                 if let Some(inner) = map.get(key) {
-                    if let Some(text) = normalize_content_value(inner) {
-                        if !text.is_empty() {
-                            return Some(text);
-                        }
+                    let start = out.len();
+                    append_content_value(inner, out);
+                    if out.len() > start {
+                        return;
                     }
                 }
             }
 
-            if let Some(parts) = map.get("parts") {
-                if let Some(text) = normalize_content_value(parts) {
-                    if !text.is_empty() {
-                        return Some(text);
+            for key in ["parts", "messages"] {
+                if let Some(inner) = map.get(key) {
+                    let start = out.len();
+                    append_content_value(inner, out);
+                    if out.len() > start {
+                        return;
                     }
                 }
             }
-
-            if let Some(messages) = map.get("messages") {
-                if let Some(text) = normalize_content_value(messages) {
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
-                }
-            }
-
-            None
         }
+    }
+}
+
+fn normalize_content_value(value: &serde_json::Value) -> Option<String> {
+    let mut out = String::new();
+    append_content_value(value, &mut out);
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 

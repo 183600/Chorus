@@ -903,14 +903,6 @@ impl Config {
         Self::load(&path.to_string_lossy())
     }
 
-    pub fn build_model_map(&self) -> HashMap<String, ModelConfig> {
-        self.models
-            .iter()
-            .cloned()
-            .map(|m| (m.name.clone(), m))
-            .collect()
-    }
-
     pub fn effective_timeouts_for_domain(&self, domain: Option<&str>) -> TimeoutConfig {
         if let Some(d) = domain {
             if let Some(ovr) = self.workflow.domains.get(d) {

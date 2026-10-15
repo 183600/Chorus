@@ -130,18 +130,39 @@ pub struct SynthesizerDetails {
 }
 
 pub struct WorkflowEngine {
-    config: Config,
-    model_configs: HashMap<String, ModelConfig>,
-    llm_clients: RwLock<HashMap<LlmClientCacheKey, Arc<LLMClient>>>,
+    config: Arc<Config>,
+    model_configs: HashMap<String, usize>,
+    api_timeouts: HashMap<String, crate::config::TimeoutConfig>,
+    llm_clients: RwLock<Vec<(LlmClientCacheKey, Arc<LLMClient>)>>,
 }
 
 impl WorkflowEngine {
+    #[cfg(test)]
     pub fn new(config: Config) -> Self {
-        let model_configs = config.build_model_map();
+        Self::from_shared(Arc::new(config))
+    }
+
+    pub fn from_shared(config: Arc<Config>) -> Self {
+        let mut model_configs = HashMap::with_capacity(config.models.len());
+        let mut api_timeouts = HashMap::with_capacity(config.models.len());
+        for (index, model) in config.models.iter().enumerate() {
+            model_configs.insert(model.name.clone(), index);
+            api_timeouts
+                .entry(model.api_base.clone())
+                .or_insert_with(|| Self::resolve_timeouts(&config, &model.api_base));
+        }
         Self {
             config,
             model_configs,
-            llm_clients: RwLock::new(HashMap::new()),
+            api_timeouts,
+            llm_clients: RwLock::new(Vec::new()),
+        }
+    }
+
+    fn resolve_timeouts(config: &Config, api_base: &str) -> crate::config::TimeoutConfig {
+        match Url::parse(api_base) {
+            Ok(url) => config.effective_timeouts_for_domain(url.host_str()),
+            Err(_) => config.effective_timeouts_for_domain(None),
         }
     }
 
@@ -173,18 +194,33 @@ impl WorkflowEngine {
             .await
     }
 
+    fn find_cached_client(
+        clients: &[(LlmClientCacheKey, Arc<LLMClient>)],
+        api_base: &str,
+        api_key: &str,
+        timeout_secs: u64,
+    ) -> Option<Arc<LLMClient>> {
+        clients
+            .iter()
+            .find(|(key, _)| {
+                key.api_base == api_base
+                    && key.api_key == api_key
+                    && key.timeout_secs == timeout_secs
+            })
+            .map(|(_, client)| Arc::clone(client))
+    }
+
     async fn get_llm_client(
         &self,
         api_base: &str,
         api_key: &str,
         timeout_secs: u64,
     ) -> Result<Arc<LLMClient>> {
-        let key = LlmClientCacheKey::new(api_base, api_key, timeout_secs);
-
         {
             let clients = self.llm_clients.read().await;
-            if let Some(client) = clients.get(&key) {
-                return Ok(Arc::clone(client));
+            if let Some(client) = Self::find_cached_client(&clients, api_base, api_key, timeout_secs)
+            {
+                return Ok(client);
             }
         }
 
@@ -195,17 +231,20 @@ impl WorkflowEngine {
         )?);
 
         let mut clients = self.llm_clients.write().await;
-        Ok(Arc::clone(
-            clients.entry(key).or_insert_with(|| Arc::clone(&new_client)),
-        ))
+        if let Some(client) = Self::find_cached_client(&clients, api_base, api_key, timeout_secs) {
+            return Ok(client);
+        }
+        clients.push((
+            LlmClientCacheKey::new(api_base, api_key, timeout_secs),
+            Arc::clone(&new_client),
+        ));
+        Ok(new_client)
     }
 
     fn effective_timeouts_for_api_base(&self, api_base: &str) -> crate::config::TimeoutConfig {
-        match Url::parse(api_base) {
-            Ok(url) => self
-                .config
-                .effective_timeouts_for_domain(url.host_str()),
-            Err(_) => self.config.effective_timeouts_for_domain(None),
+        match self.api_timeouts.get(api_base) {
+            Some(timeouts) => timeouts.clone(),
+            None => Self::resolve_timeouts(&self.config, api_base),
         }
     }
 
@@ -938,10 +977,16 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             }
         };
 
-        let mut selector_prompt = format!(
-            "原始用户问题：\n{}\n\n以下是多个模型给出的回答，请选出质量最高的一条。\n\n",
-            original_prompt
-        );
+        let prompt_capacity = original_prompt.len()
+            + 160
+            + worker_responses
+                .iter()
+                .map(|(label, response)| label.len() + response.len() + 24)
+                .sum::<usize>();
+        let mut selector_prompt = String::with_capacity(prompt_capacity);
+        selector_prompt.push_str("原始用户问题：\n");
+        selector_prompt.push_str(original_prompt);
+        selector_prompt.push_str("\n\n以下是多个模型给出的回答，请选出质量最高的一条。\n\n");
 
         for (i, (label, response)) in worker_responses.iter().enumerate() {
             let _ = write!(
@@ -1092,20 +1137,33 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             )
             .await?;
 
-        let mut synthesis_prompt = format!(
-            "原始用户问题：\n{}\n\n以下是多个AI模型对该问题的回答：\n\n",
-            original_prompt
-        );
+        let prompt_capacity = original_prompt.len()
+            + 240
+            + worker_responses
+                .iter()
+                .map(|(label, response)| label.len() + response.len() + 24)
+                .sum::<usize>()
+            + selected_choice.map_or(0, |choice| {
+                choice.worker_name.len()
+                    + choice.response.len()
+                    + choice.reasoning.as_ref().map_or(0, String::len)
+                    + 64
+            });
+        let mut synthesis_prompt = String::with_capacity(prompt_capacity);
+        synthesis_prompt.push_str("原始用户问题：\n");
+        synthesis_prompt.push_str(original_prompt);
+        synthesis_prompt.push_str("\n\n以下是多个AI模型对该问题的回答：\n\n");
 
         for (i, (label, response)) in worker_responses.iter().enumerate() {
             let _ = write!(synthesis_prompt, "【模型{}：{}】\n{}\n\n", i + 1, label, response);
         }
 
         if let Some(choice) = selected_choice {
-            synthesis_prompt.push_str(&format!(
+            let _ = write!(
+                synthesis_prompt,
                 "选择器推荐的最佳回答（编号 {} / 模型 {}）：\n{}\n\n",
                 choice.index, choice.worker_name, choice.response
-            ));
+            );
             if let Some(reasoning) = &choice.reasoning {
                 synthesis_prompt.push_str("推荐理由：\n");
                 synthesis_prompt.push_str(reasoning);
@@ -1231,12 +1289,13 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
     }
 
     fn lookup_model(&self, name: &str) -> Result<&ModelConfig> {
-        self.model_configs.get(name).ok_or_else(|| {
+        let index = *self.model_configs.get(name).ok_or_else(|| {
             anyhow!(
                 "Model '{}' not found in configuration. Did you define it under [[model]]?",
                 name
             )
-        })
+        })?;
+        Ok(&self.config.models[index])
     }
 }
 
