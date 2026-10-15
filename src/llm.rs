@@ -98,10 +98,11 @@ impl LLMClient {
         temperature: Option<f32>,
         stream: Option<UnboundedSender<String>>,
     ) -> Result<CompletionResult> {
+        let stream_was_requested = stream.is_some();
         let request = ChatCompletionRequest {
             messages: &messages,
             model,
-            stream: stream.is_some(),
+            stream: stream_was_requested,
             temperature: temperature.map(f64::from),
         };
 
@@ -132,7 +133,7 @@ impl LLMClient {
             ));
         }
 
-        if stream.is_some() && response_is_event_stream(&response) {
+        if stream_was_requested && response_is_event_stream(&response) {
             return self.consume_event_stream(response, stream).await;
         }
 
@@ -145,7 +146,7 @@ impl LLMClient {
             }
             return Ok(CompletionResult {
                 content,
-                streamed: false,
+                streamed: stream_was_requested,
             });
         }
 
@@ -169,13 +170,14 @@ impl LLMClient {
         let mut final_text = String::new();
         let mut streamed = false;
         let mut buffer = String::new();
+        let mut pending = Vec::new();
         let mut cursor = 0usize;
         let mut byte_stream = response.bytes_stream();
 
         while let Some(item) = byte_stream.next().await {
             let chunk = item?;
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&chunk_str);
+            pending.extend_from_slice(&chunk);
+            append_valid_utf8(&mut pending, &mut buffer);
 
             loop {
                 let Some((idx, sep_len)) = find_event_separator(&buffer[cursor..]) else {
@@ -279,11 +281,43 @@ fn response_is_event_stream(response: &reqwest::Response) -> bool {
         .unwrap_or(false)
 }
 
+fn append_valid_utf8(pending: &mut Vec<u8>, out: &mut String) {
+    loop {
+        let (valid_up_to, error_len) = match std::str::from_utf8(pending) {
+            Ok(text) => {
+                out.push_str(text);
+                pending.clear();
+                return;
+            }
+            Err(err) => (err.valid_up_to(), err.error_len()),
+        };
+
+        if valid_up_to > 0 {
+            if let Ok(text) = std::str::from_utf8(&pending[..valid_up_to]) {
+                out.push_str(text);
+            }
+            pending.drain(..valid_up_to);
+        }
+
+        match error_len {
+            Some(invalid_len) => {
+                out.push('\u{FFFD}');
+                pending.drain(..invalid_len);
+            }
+            None => return,
+        }
+    }
+}
+
 fn find_event_separator(buffer: &str) -> Option<(usize, usize)> {
-    if let Some(idx) = buffer.find("\r\n\r\n") {
-        Some((idx, 4))
-    } else {
-        buffer.find("\n\n").map(|idx| (idx, 2))
+    let lf = buffer.find("\n\n").map(|idx| (idx, 2));
+    let crlf = buffer.find("\r\n\r\n").map(|idx| (idx, 4));
+
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
+        (Some(lf), None) => Some(lf),
+        (None, Some(crlf)) => Some(crlf),
+        (None, None) => None,
     }
 }
 
@@ -817,6 +851,165 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
             legacy.to_string()
+        );
+    }
+
+    #[test]
+    fn append_valid_utf8_reassembles_split_multibyte_characters() {
+        let full = "中文".as_bytes();
+        let mut pending = Vec::new();
+        let mut out = String::new();
+
+        pending.extend_from_slice(&full[..2]);
+        append_valid_utf8(&mut pending, &mut out);
+        assert!(out.is_empty());
+
+        pending.extend_from_slice(&full[2..4]);
+        append_valid_utf8(&mut pending, &mut out);
+        assert_eq!(out, "中");
+
+        pending.extend_from_slice(&full[4..]);
+        append_valid_utf8(&mut pending, &mut out);
+        assert_eq!(out, "中文");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn append_valid_utf8_replaces_invalid_bytes_and_makes_progress() {
+        let mut pending = vec![0xFF, b'a'];
+        let mut out = String::new();
+        append_valid_utf8(&mut pending, &mut out);
+        assert_eq!(out, "\u{FFFD}a");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn event_separator_uses_the_earliest_terminator() {
+        assert_eq!(
+            find_event_separator("data: a\n\ndata: b\r\n\r\n"),
+            Some((7, 2))
+        );
+        assert_eq!(find_event_separator("data: a\r\n\r\n"), Some((7, 4)));
+        assert_eq!(find_event_separator("data: a\n\n"), Some((7, 2)));
+        assert_eq!(find_event_separator("data: a"), None);
+    }
+
+    #[tokio::test]
+    async fn consumes_event_stream_with_split_utf8_across_chunks() {
+        use axum::body::Body;
+        use axum::http::header;
+        use axum::response::Response;
+        use axum::routing::post;
+        use axum::Router;
+        use bytes::Bytes;
+        use std::convert::Infallible;
+        use tokio::sync::mpsc;
+
+        async fn sse_handler() -> Response {
+            let mut payload = Vec::new();
+            for text in ["中文测试", "完成"] {
+                payload.extend_from_slice(
+                    format!(
+                        "data: {}\n\n",
+                        serde_json::json!({"choices":[{"delta":{"content":text}}]})
+                    )
+                    .as_bytes(),
+                );
+            }
+            payload.extend_from_slice(b"data: [DONE]\n\n");
+
+            let chunks: Vec<Bytes> = payload.chunks(5).map(Bytes::copy_from_slice).collect();
+            let body_stream =
+                futures::stream::iter(chunks.into_iter().map(Ok::<Bytes, Infallible>));
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(body_stream))
+                .unwrap()
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(sse_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = LLMClient::new(
+            format!("http://127.0.0.1:{}/v1", port),
+            "sk-test".to_string(),
+            30,
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let messages = vec![ChatMessage {
+            content: "hi".to_string(),
+            role: "user".to_string(),
+        }];
+
+        let result = client
+            .chat_completion_with_stream("m", messages, Some(0.0), Some(tx))
+            .await
+            .unwrap();
+
+        assert!(result.streamed);
+        assert_eq!(result.content, "中文测试完成");
+
+        let mut received = String::new();
+        while let Ok(piece) = rx.try_recv() {
+            received.push_str(&piece);
+        }
+        assert_eq!(received, "中文测试完成");
+    }
+
+    #[tokio::test]
+    async fn non_sse_response_with_stream_is_delivered_once() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::sync::mpsc;
+
+        async fn json_handler() -> Json<serde_json::Value> {
+            Json(serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello"},
+                    "finish_reason": "stop"
+                }]
+            }))
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(json_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = LLMClient::new(
+            format!("http://127.0.0.1:{}/v1", port),
+            "sk-test".to_string(),
+            30,
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let messages = vec![ChatMessage {
+            content: "hi".to_string(),
+            role: "user".to_string(),
+        }];
+
+        let result = client
+            .chat_completion_with_stream("m", messages, Some(0.0), Some(tx))
+            .await
+            .unwrap();
+
+        assert_eq!(result.content, "hello");
+        assert!(
+            result.streamed,
+            "content forwarded through the stream callback must not be sent again"
+        );
+        assert_eq!(rx.recv().await.as_deref(), Some("hello"));
+        assert!(
+            rx.try_recv().is_err(),
+            "content must be delivered exactly once"
         );
     }
 }
