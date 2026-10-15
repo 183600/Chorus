@@ -1195,4 +1195,130 @@ synthesizer_timeout_secs = 90
             _ => panic!("Expected nested workflow at level 1"),
         }
     }
+
+    #[test]
+    fn migration_preserves_nested_worker_depth_for_legacy_config() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "chorus_legacy_depth_migration_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.toml");
+
+        let config_content = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+analyzer_model = "m1"
+worker_models = ["m1"]
+synthesizer_model = "m1"
+nested_worker_depth = 2
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+        fs::write(&config_path, config_content).unwrap();
+
+        Config::migrate_config_if_needed(&config_path).unwrap();
+
+        let migrated = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            migrated.contains("nested_worker_depth = 2"),
+            "migrated config should keep nested_worker_depth, got:\n{}",
+            migrated
+        );
+
+        let cfg = Config::load(&config_path.to_string_lossy()).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(2));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+        match &cfg.workflow_integration.workers[0] {
+            WorkflowWorker::Workflow(plan) => {
+                assert_eq!(plan.workers.len(), 2);
+                for worker in &plan.workers {
+                    match worker {
+                        WorkflowWorker::Model(target) => assert_eq!(target.model, "m1"),
+                        _ => panic!("Expected model worker in replicated workflow"),
+                    }
+                }
+            }
+            _ => panic!("Expected replicated nested workflow after reload"),
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn migration_preserves_nested_worker_depth_for_structured_config() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "chorus_structured_depth_migration_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.toml");
+
+        let config_content = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+nested_worker_depth = 1
+
+[workflow-integration.analyzer]
+ref = "m1"
+
+[[workflow-integration.workers]]
+name = "m1"
+
+[workflow-integration.synthesizer]
+ref = "m1"
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+        fs::write(&config_path, config_content).unwrap();
+
+        Config::migrate_config_if_needed(&config_path).unwrap();
+
+        let migrated = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            migrated.contains("nested_worker_depth = 1"),
+            "migrated config should keep nested_worker_depth, got:\n{}",
+            migrated
+        );
+
+        let cfg = Config::load(&config_path.to_string_lossy()).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(1));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

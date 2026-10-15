@@ -695,7 +695,7 @@ impl Config {
         Ok(path)
     }
 
-    fn migrate_config_if_needed(config_path: &Path) -> Result<()> {
+    pub(crate) fn migrate_config_if_needed(config_path: &Path) -> Result<()> {
         let content = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
@@ -718,6 +718,11 @@ impl Config {
                     || table.contains_key("synthesizer_model")
             })
             .unwrap_or(false);
+
+        let nested_worker_depth = workflow_table
+            .and_then(|table| table.get("nested_worker_depth"))
+            .and_then(Value::as_integer)
+            .and_then(|value| u32::try_from(value).ok());
 
         if has_json && !legacy_fields_present {
             return Ok(());
@@ -750,37 +755,41 @@ impl Config {
             migrations.push("workflow 节点结构");
 
             match toml::from_str::<LegacyConfig>(&content) {
-                Ok(legacy) => Config {
-                    server: legacy.server,
-                    models: legacy.models,
-                    workflow_integration: WorkflowPlan {
-                        analyzer: WorkflowModelTarget {
-                            model: legacy.workflow_integration.analyzer_model,
-                            temperature: None,
-                            auto_temperature: None,
-                        },
-                        workers: legacy
-                            .workflow_integration
-                            .worker_models
-                            .into_iter()
-                            .map(|model| {
-                                WorkflowWorker::Model(WorkflowModelTarget {
-                                    model,
-                                    temperature: None,
-                                    auto_temperature: None,
+                Ok(legacy) => {
+                    let mut config = Config {
+                        server: legacy.server,
+                        models: legacy.models,
+                        workflow_integration: WorkflowPlan {
+                            analyzer: WorkflowModelTarget {
+                                model: legacy.workflow_integration.analyzer_model,
+                                temperature: None,
+                                auto_temperature: None,
+                            },
+                            workers: legacy
+                                .workflow_integration
+                                .worker_models
+                                .into_iter()
+                                .map(|model| {
+                                    WorkflowWorker::Model(WorkflowModelTarget {
+                                        model,
+                                        temperature: None,
+                                        auto_temperature: None,
+                                    })
                                 })
-                            })
-                            .collect(),
-                        synthesizer: Some(WorkflowModelTarget {
-                            model: legacy.workflow_integration.synthesizer_model,
-                            temperature: None,
-                            auto_temperature: None,
-                        }),
-                        selector: None,
-                        nested_worker_depth: None,
-                    },
-                    workflow: legacy.workflow,
-                },
+                                .collect(),
+                            synthesizer: Some(WorkflowModelTarget {
+                                model: legacy.workflow_integration.synthesizer_model,
+                                temperature: None,
+                                auto_temperature: None,
+                            }),
+                            selector: None,
+                            nested_worker_depth,
+                        },
+                        workflow: legacy.workflow,
+                    };
+                    config.workflow_integration.apply_worker_replication();
+                    config
+                }
                 Err(err) => {
                     tracing::warn!(
                         "Detected legacy workflow-integration fields but failed to parse legacy format: {}. Falling back to workflow plan JSON parser.",
@@ -853,6 +862,12 @@ impl Config {
             .with_context(|| "Failed to serialize workflow integration to JSON string")?;
         let mut workflow_integration = toml::map::Map::new();
         workflow_integration.insert("json".to_string(), Value::String(workflow_json));
+        if let Some(depth) = config.workflow_integration.nested_worker_depth {
+            workflow_integration.insert(
+                "nested_worker_depth".to_string(),
+                Value::Integer(i64::from(depth)),
+            );
+        }
         root.insert(
             "workflow-integration".to_string(),
             Value::Table(workflow_integration),
