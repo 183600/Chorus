@@ -221,9 +221,7 @@ impl WorkflowEngine {
     }
 
     /// Returns a client for the endpoint. Clients are cached per
-    /// `(api_base, api_key)` so all workflow stages share one connection pool;
-    /// the per-stage timeout is applied on each request instead of being baked
-    /// into the client.
+    /// `(api_base, api_key)`; the per-stage timeout is applied on each request.
     async fn get_llm_client(
         &self,
         api_base: &str,

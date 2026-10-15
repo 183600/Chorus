@@ -188,9 +188,6 @@ impl LLMClient {
         timeout_secs: u64,
         retry: RetryPolicy,
     ) -> Result<Self> {
-        // The timeout is applied per request (rather than baked into the
-        // client) so a single connection pool can be shared by callers that
-        // use different per-stage timeouts.
         let client = Client::builder()
             .build()
             .with_context(|| format!("Failed to build HTTP client for {}", api_base))?;
@@ -221,8 +218,7 @@ impl LLMClient {
         Ok(result.content)
     }
 
-    /// Sends a single-user-message chat completion while borrowing the prompt
-    /// instead of cloning it into an owned [`ChatMessage`].
+    /// Sends a single-user-message chat completion.
     #[allow(dead_code)]
     pub async fn chat_completion_prompt(
         &self,
@@ -253,7 +249,7 @@ impl LLMClient {
     }
 
     /// Like [`LLMClient::chat_completion_prompt`], but overrides the request
-    /// timeout so shared clients can serve stages with different timeouts.
+    /// timeout.
     pub(crate) async fn chat_completion_prompt_with_timeout(
         &self,
         model: &str,
@@ -270,9 +266,8 @@ impl LLMClient {
         Ok(result.content)
     }
 
-    /// Preserves whether any content had been forwarded when the call failed,
-    /// so callers can avoid spawning a separate forwarding task just to
-    /// observe that flag while streaming.
+    /// Reports whether any content had already been forwarded when the call
+    /// failed.
     pub(crate) async fn chat_completion_prompt_with_timeout_and_stream_tracked(
         &self,
         model: &str,
@@ -487,9 +482,6 @@ impl LLMClient {
                     })
                 }
             };
-            // Chunks that are already valid UTF-8 (the common case when no
-            // multi-byte character straddles the boundary) can be appended to
-            // the buffer directly instead of being staged through `pending`.
             match std::str::from_utf8(&chunk) {
                 Ok(text) if pending.is_empty() => buffer.push_str(text),
                 _ => {
@@ -512,9 +504,6 @@ impl LLMClient {
 
                 let event = event.strip_suffix('\r').unwrap_or(event);
 
-                // The overwhelmingly common case is a single `data:` line,
-                // whose payload can be borrowed straight from the buffer
-                // instead of being copied into the scratch string.
                 let trimmed = match single_data_payload(event) {
                     Some(payload) => {
                         let payload = payload.trim();
@@ -623,11 +612,9 @@ impl LLMClient {
 
 /// Common OpenAI-compatible streaming delta shape.
 ///
-/// Deserializing into borrowed strings avoids building a full
-/// `serde_json::Value` tree for every streamed token. Anything that does not
-/// fit this shape (non-string content, tool calls, message-shaped payloads,
-/// ...) is reported as `Unsupported` and handled by the generic `Value` path
-/// so behavior stays identical for all providers.
+/// Anything that does not fit this shape (non-string content, tool calls,
+/// message-shaped payloads, ...) is reported as `Unsupported` and handled by
+/// the generic `Value` path so behavior stays identical for all providers.
 #[derive(Deserialize)]
 struct FastStreamChunk<'a> {
     #[serde(default, borrow)]

@@ -135,9 +135,6 @@ fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
 }
 
 /// Lazily splits an owned stream segment into protocol-sized events.
-///
-/// Owning the segment lets each segment be turned into a stream without
-/// collecting a `Vec` first; every event is serialized only when polled.
 struct ChunkEvents<F> {
     content: String,
     max_len: usize,
