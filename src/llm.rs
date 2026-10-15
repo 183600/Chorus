@@ -46,6 +46,17 @@ pub struct CompletionResult {
     pub streamed: bool,
 }
 
+/// Error raised while consuming an SSE response body.
+///
+/// Carries whether any content had already been forwarded to the caller so the
+/// retry loop can decide if the request may be safely retried without
+/// duplicating partial output.
+#[derive(Debug)]
+struct StreamFailure {
+    error: reqwest::Error,
+    streamed: bool,
+}
+
 #[derive(Serialize)]
 #[allow(dead_code)]
 struct ChatCompletionRequest<'a> {
@@ -290,7 +301,25 @@ impl LLMClient {
             }
 
             if stream_was_requested && response_is_event_stream(&response) {
-                return self.consume_event_stream(response, stream).await;
+                match self.consume_event_stream(response, stream.clone()).await {
+                    Ok(result) => return Ok(result),
+                    Err(failure) => {
+                        if !failure.streamed
+                            && self.can_retry(attempt)
+                            && is_retryable_reqwest_error(&failure.error)
+                        {
+                            self.wait_before_retry(
+                                attempt,
+                                None,
+                                model,
+                                &failure.error.to_string(),
+                            )
+                            .await;
+                            continue;
+                        }
+                        return Err(failure.error.into());
+                    }
+                }
             }
 
             // Be tolerant to different provider response shapes
@@ -357,7 +386,7 @@ impl LLMClient {
         &self,
         response: reqwest::Response,
         stream: Option<UnboundedSender<String>>,
-    ) -> Result<CompletionResult> {
+    ) -> std::result::Result<CompletionResult, StreamFailure> {
         let mut final_text = String::new();
         let mut streamed = false;
         let mut buffer = String::new();
@@ -367,7 +396,10 @@ impl LLMClient {
         let mut byte_stream = response.bytes_stream();
 
         while let Some(item) = byte_stream.next().await {
-            let chunk = item?;
+            let chunk = match item {
+                Ok(chunk) => chunk,
+                Err(error) => return Err(StreamFailure { error, streamed }),
+            };
             pending.extend_from_slice(&chunk);
             append_valid_utf8(&mut pending, &mut buffer);
 
@@ -1700,5 +1732,160 @@ mod tests {
             3,
             "expected one initial attempt plus two retries for connection failures"
         );
+    }
+
+    #[tokio::test]
+    async fn retries_streaming_body_failure_before_first_token() {
+        use axum::body::Body;
+        use axum::http::header;
+        use axum::response::Response;
+        use axum::routing::post;
+        use axum::Router;
+        use bytes::Bytes;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    let call = counter.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        let keepalive = futures::stream::once(async {
+                            Ok::<Bytes, std::io::Error>(Bytes::from_static(b": keepalive\n\n"))
+                        });
+                        let abort = futures::stream::once(async {
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            Err::<Bytes, std::io::Error>(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "upstream aborted",
+                            ))
+                        });
+                        Response::builder()
+                            .header(header::CONTENT_TYPE, "text/event-stream")
+                            .body(Body::from_stream(
+                                futures::StreamExt::chain(keepalive, abort),
+                            ))
+                            .unwrap()
+                    } else {
+                        Response::builder()
+                            .header(header::CONTENT_TYPE, "text/event-stream")
+                            .body(Body::from(
+                                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+                            ))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = LLMClient::new_with_retry(
+            format!("http://127.0.0.1:{}/v1", port),
+            "sk-test".to_string(),
+            30,
+            RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(5)),
+        )
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let result = client
+            .chat_completion_prompt_with_stream("m", "hi", Some(0.0), Some(tx))
+            .await
+            .expect("a stream failing before any content must be retried");
+
+        assert_eq!(result.content, "hello");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "aborted stream should be retried exactly once"
+        );
+        let mut streamed = Vec::new();
+        while let Ok(piece) = rx.try_recv() {
+            streamed.push(piece);
+        }
+        assert_eq!(streamed, vec!["hello".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_streaming_failure_after_content() {
+        use axum::body::Body;
+        use axum::http::header;
+        use axum::response::Response;
+        use axum::routing::post;
+        use axum::Router;
+        use bytes::Bytes;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let first = futures::stream::once(async {
+                        Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+                        ))
+                    });
+                    let abort = futures::stream::once(async {
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                        Err::<Bytes, std::io::Error>(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "upstream aborted",
+                        ))
+                    });
+                    let body_stream = futures::StreamExt::chain(first, abort);
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from_stream(body_stream))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = LLMClient::new_with_retry(
+            format!("http://127.0.0.1:{}/v1", port),
+            "sk-test".to_string(),
+            30,
+            RetryPolicy::new(2, Duration::from_millis(1), Duration::from_millis(5)),
+        )
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _ = client
+            .chat_completion_prompt_with_stream("m", "hi", Some(0.0), Some(tx))
+            .await
+            .expect_err("a stream failing after content must not be retried");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "partial streamed output must never be retried"
+        );
+        let mut streamed = Vec::new();
+        while let Ok(piece) = rx.try_recv() {
+            streamed.push(piece);
+        }
+        assert_eq!(streamed, vec!["partial".to_string()]);
     }
 }

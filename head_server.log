@@ -1,0 +1,603 @@
+[2m2026-10-15T20:25:38.344290Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Starting Chorus server on 127.0.0.1:19203
+[2m2026-10-15T20:25:38.344344Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Analyzer model: m1
+[2m2026-10-15T20:25:38.344351Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Retry policy: max_retries=3, initial_backoff=50ms, max_backoff=200ms
+[2m2026-10-15T20:25:38.344365Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Worker nodes: ["m1"]
+[2m2026-10-15T20:25:38.344383Z[0m [32m INFO[0m [2mchorus[0m[2m:[0m Synthesizer model: m1
+[2m2026-10-15T20:25:38.344736Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Chorus server listening on http://127.0.0.1:19203
+[2m2026-10-15T20:26:21.318284Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:21.318360Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:21.318377Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:21.318392Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:21.318406Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:21.342241Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:21.342276Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:21.342307Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S5:js-fallback x",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:21.343710Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:21.343744Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:21.343759Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:21.343783Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:21.343792Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:21.343823Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS5:js-fallback x\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:21.385104Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:31.415866Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:31.415946Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:31.415962Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:31.415974Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:31.415985Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:31.416001Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:31.416012Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.416058Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S1:split-utf8 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.416826Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:31.416847Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:31.416859Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:31.416878Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:31.416886Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.416911Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS1:split-utf8 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.458162Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:31.459113Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:31.459238Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:31.459259Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:31.459267Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:31.459288Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:31.459302Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:31.459311Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.459339Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S1:split-utf8 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.500172Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:31.500217Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:31.500230Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:31.500255Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:31.500264Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.500305Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS1:split-utf8 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.770631Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:31.771698Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:31.771729Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:31.771746Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:31.771759Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:31.771770Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:31.771788Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:31.771801Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.771839Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S2:crlf 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.772889Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:31.772933Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:31.772949Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:31.772976Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:31.772987Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.773019Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS2:crlf 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.814123Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:31.815023Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:31.815141Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:31.815158Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:31.815167Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:31.815178Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:31.815195Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:31.815208Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.815237Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S2:crlf 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.856110Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:31.856150Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:31.856162Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:31.856182Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:31.856190Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.856220Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS2:crlf 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.897111Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:31.897835Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:31.897857Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:31.897866Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:31.897872Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:31.897879Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:31.897888Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:31.897895Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.897914Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S3:finish-early 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.939091Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:31.939115Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:31.939126Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:31.939145Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:31.939153Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.939179Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS3:finish-early 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:31.980061Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:31.980774Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:31.980882Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:31.980899Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:31.980908Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:31.980917Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:31.980948Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:31.980956Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:31.980973Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S3:finish-early 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.022074Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.022098Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.022108Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.022127Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.022134Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.022160Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS3:finish-early 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.063073Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.063705Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:32.063727Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.063735Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.063740Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.063747Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.063755Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.063763Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.063780Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S4:fast-text 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.105101Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.105125Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.105136Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.105154Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.105170Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.105196Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS4:fast-text 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.146068Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.146736Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:32.146834Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.146850Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.146858Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.146867Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.146877Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.146885Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.146903Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S4:fast-text 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.188099Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.188125Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.188135Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.188152Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.188159Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.188185Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS4:fast-text 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.229142Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.229761Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:32.229784Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.229792Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.229798Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.229814Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.229823Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.229831Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.229849Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S5:js-fallback 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.271084Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.271109Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.271120Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.271136Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.271144Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.271169Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS5:js-fallback 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.312083Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.312795Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:32.312897Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.312914Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.312942Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.312959Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.312974Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.312982Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.313004Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S5:js-fallback 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.354285Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.354337Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.354352Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.354380Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.354390Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.354429Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS5:js-fallback 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.396103Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.397001Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:32.397029Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.397042Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.397055Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.397066Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.397081Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.397094Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.397121Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S6:retry 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.438324Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.438382Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.438399Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.438431Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.438444Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.438488Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS6:retry 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.480427Z[0m [33m WARN[0m [2mchorus::llm[0m[2m:[0m Transient LLM API failure, retrying [3murl[0m[2m=[0mhttp://127.0.0.1:19199/v1/chat/completions [3mmodel[0m[2m=[0m"m1" [3mattempt[0m[2m=[0m1 [3mmax_retries[0m[2m=[0m3 [3mdelay_ms[0m[2m=[0m50 [3mreason[0m[2m=[0m"HTTP 503 Service Unavailable: temporarily down"
+[2m2026-10-15T20:26:32.532814Z[0m [33m WARN[0m [2mchorus::llm[0m[2m:[0m Transient LLM API failure, retrying [3murl[0m[2m=[0mhttp://127.0.0.1:19199/v1/chat/completions [3mmodel[0m[2m=[0m"m1" [3mattempt[0m[2m=[0m2 [3mmax_retries[0m[2m=[0m3 [3mdelay_ms[0m[2m=[0m100 [3mreason[0m[2m=[0m"HTTP 503 Service Unavailable: temporarily down"
+[2m2026-10-15T20:26:32.635352Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.636725Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:32.636865Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.636884Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.636893Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.636905Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.636938Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.636953Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.636987Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S6:retry 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.678381Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.678444Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.678460Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.678490Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.678501Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.678543Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS6:retry 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.720326Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.721247Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:32.721282Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.721297Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.721310Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.721325Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.721344Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.721357Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.721392Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S7:reasoning 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.763383Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.763448Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.763465Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.763500Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.763527Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.763576Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS7:reasoning 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.805353Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.806473Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:32.806609Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.806632Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.806641Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.806658Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.806674Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.806684Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.806720Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S7:reasoning 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.848346Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.848409Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.848426Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.848459Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.848472Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.848519Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS7:reasoning 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.890386Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.891318Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(false), include_workflow: None
+[2m2026-10-15T20:26:32.891351Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.891366Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.891380Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.891408Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.891428Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.891441Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.891476Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S8:mixed-sep 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.933331Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:32.933390Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:32.933404Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:32.933446Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:32.933456Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.933497Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS8:mixed-sep 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:32.975366Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
+[2m2026-10-15T20:26:32.976490Z[0m [32m INFO[0m [2mchorus::server[0m[2m:[0m Received generate request, stream: Some(true), include_workflow: None
+[2m2026-10-15T20:26:32.976632Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Starting workflow processing with details
+[2m2026-10-15T20:26:32.976653Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Using configured analyzer temperature: 0
+[2m2026-10-15T20:26:32.976662Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 1 completed - Temperature: 0
+[2m2026-10-15T20:26:32.976673Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Calling worker model: m1
+[2m2026-10-15T20:26:32.976691Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for worker m1 at depth 0
+[2m2026-10-15T20:26:32.976704Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:32.976739Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "S8:mixed-sep 请处理这个请求",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": false,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:33.018324Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 returned response at depth 0
+[2m2026-10-15T20:26:33.018384Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Worker m1 succeeded at depth 0
+[2m2026-10-15T20:26:33.018399Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 2 completed - Collected 1 worker responses
+[2m2026-10-15T20:26:33.018430Z[0m [34mDEBUG[0m [2mchorus::workflow[0m[2m:[0m Using temperature 0 for synthesizer m1 at depth 0
+[2m2026-10-15T20:26:33.018440Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Calling LLM API: http://127.0.0.1:19199/v1/chat/completions with model: m1
+[2m2026-10-15T20:26:33.018482Z[0m [34mDEBUG[0m [2mchorus::llm[0m[2m:[0m Request body: {
+  "messages": [
+    {
+      "content": "原始用户问题：\nS8:mixed-sep 请处理这个请求\n\n以下是多个AI模型对该问题的回答：\n\n【模型1：m1】\nworker-ok\n\n请综合以上所有回答，生成一个高质量的最终答案。要求：\n1. 综合各个模型的优点\n2. 确保答案准确、完整\n3. 保持清晰的逻辑和结构\n4. 直接给出最终答案，不要提及\"综合以上回答\"等元信息\n",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "stream": true,
+  "temperature": 0.0
+}
+[2m2026-10-15T20:26:33.060379Z[0m [32m INFO[0m [2mchorus::workflow[0m[2m:[0m Step 3 completed - Final response generated
