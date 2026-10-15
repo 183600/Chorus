@@ -6,10 +6,9 @@ use futures::stream::{self, StreamExt as _};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
 const DEFAULT_TEMPERATURE: f32 = 1.4;
@@ -19,20 +18,18 @@ const DEFAULT_WORKER_CONCURRENCY: usize = 4;
 struct LlmClientCacheKey {
     api_base: String,
     api_key: String,
-    timeout_secs: u64,
 }
 
 impl LlmClientCacheKey {
-    fn new(api_base: &str, api_key: &str, timeout_secs: u64) -> Self {
+    fn new(api_base: &str, api_key: &str) -> Self {
         Self {
             api_base: api_base.to_string(),
             api_key: api_key.to_string(),
-            timeout_secs,
         }
     }
 }
 
-pub type StreamCallback = UnboundedSender<String>;
+pub type StreamCallback = mpsc::UnboundedSender<String>;
 
 struct SelectedChoice {
     index: usize,
@@ -216,18 +213,17 @@ impl WorkflowEngine {
         clients: &[(LlmClientCacheKey, Arc<LLMClient>)],
         api_base: &str,
         api_key: &str,
-        timeout_secs: u64,
     ) -> Option<Arc<LLMClient>> {
         clients
             .iter()
-            .find(|(key, _)| {
-                key.api_base == api_base
-                    && key.api_key == api_key
-                    && key.timeout_secs == timeout_secs
-            })
+            .find(|(key, _)| key.api_base == api_base && key.api_key == api_key)
             .map(|(_, client)| Arc::clone(client))
     }
 
+    /// Returns a client for the endpoint. Clients are cached per
+    /// `(api_base, api_key)` so all workflow stages share one connection pool;
+    /// the per-stage timeout is applied on each request instead of being baked
+    /// into the client.
     async fn get_llm_client(
         &self,
         api_base: &str,
@@ -239,8 +235,7 @@ impl WorkflowEngine {
                 .llm_clients
                 .read()
                 .unwrap_or_else(|err| err.into_inner());
-            if let Some(client) = Self::find_cached_client(&clients, api_base, api_key, timeout_secs)
-            {
+            if let Some(client) = Self::find_cached_client(&clients, api_base, api_key) {
                 return Ok(client);
             }
         }
@@ -256,11 +251,11 @@ impl WorkflowEngine {
             .llm_clients
             .write()
             .unwrap_or_else(|err| err.into_inner());
-        if let Some(client) = Self::find_cached_client(&clients, api_base, api_key, timeout_secs) {
+        if let Some(client) = Self::find_cached_client(&clients, api_base, api_key) {
             return Ok(client);
         }
         clients.push((
-            LlmClientCacheKey::new(api_base, api_key, timeout_secs),
+            LlmClientCacheKey::new(api_base, api_key),
             Arc::clone(&new_client),
         ));
         Ok(new_client)
@@ -477,18 +472,17 @@ impl WorkflowEngine {
         depth: usize,
     ) -> Result<String> {
         let _ = self;
-        let plan_label = plan.label();
 
         if let Some(details) = selector_details {
             if let Some(selected_response) = details.selected_response.clone() {
                 if depth == 0 {
                     tracing::info!(
-                        plan = %plan_label,
+                        plan = %plan.label(),
                         "Using selector recommendation as final response"
                     );
                 } else {
                     tracing::debug!(
-                        plan = %plan_label,
+                        plan = %plan.label(),
                         depth,
                         "Using selector recommendation as final response"
                     );
@@ -499,13 +493,13 @@ impl WorkflowEngine {
             if let Some(choice) = selected_choice {
                 if depth == 0 {
                     tracing::info!(
-                        plan = %plan_label,
+                        plan = %plan.label(),
                         worker = %choice.worker_name,
                         "Selector chose worker response; using it as final output"
                     );
                 } else {
                     tracing::debug!(
-                        plan = %plan_label,
+                        plan = %plan.label(),
                         depth,
                         worker = %choice.worker_name,
                         "Selector chose worker response; using it as final output"
@@ -515,13 +509,13 @@ impl WorkflowEngine {
             }
 
             tracing::warn!(
-                plan = %plan_label,
+                plan = %plan.label(),
                 depth,
                 "Selector failed to provide a choice; falling back to worker responses"
             );
         } else {
             tracing::debug!(
-                plan = %plan_label,
+                plan = %plan.label(),
                 depth,
                 "No selector configured; using worker responses directly"
             );
@@ -538,12 +532,12 @@ impl WorkflowEngine {
         if let Some(response) = fallback {
             if depth == 0 {
                 tracing::info!(
-                    plan = %plan_label,
+                    plan = %plan.label(),
                     "Using first successful worker response as final output"
                 );
             } else {
                 tracing::debug!(
-                    plan = %plan_label,
+                    plan = %plan.label(),
                     depth,
                     "Using first successful worker response as final output"
                 );
@@ -552,7 +546,7 @@ impl WorkflowEngine {
         } else {
             Err(anyhow!(
                 "Workflow plan {} could not determine a final response because the selector failed and no worker responses were available.",
-                plan_label
+                plan.label()
             ))
         }
     }
@@ -652,7 +646,12 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         let response = match client
-            .chat_completion_prompt(&target.model, &analysis_prompt, Some(0.3))
+            .chat_completion_prompt_with_timeout(
+                &target.model,
+                &analysis_prompt,
+                Some(0.3),
+                Duration::from_secs(timeouts.analyzer_timeout_secs),
+            )
             .await
         {
             Ok(response) => response,
@@ -943,7 +942,12 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         let response = client
-            .chat_completion_prompt(&target.model, prompt, Some(temperature))
+            .chat_completion_prompt_with_timeout(
+                &target.model,
+                prompt,
+                Some(temperature),
+                Duration::from_secs(timeouts.worker_timeout_secs),
+            )
             .await?;
 
         tracing::debug!(
@@ -1080,7 +1084,12 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         let raw_output = match client
-            .chat_completion_prompt(&target.model, &selector_prompt, Some(temperature))
+            .chat_completion_prompt_with_timeout(
+                &target.model,
+                &selector_prompt,
+                Some(temperature),
+                Duration::from_secs(timeouts.synthesizer_timeout_secs),
+            )
             .await
         {
             Ok(content) => content,
@@ -1270,46 +1279,21 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             depth
         );
 
-        let (synth_stream, streamed_flag, forwarder) = match stream {
-            Some(sender) => {
-                let (tracked_tx, mut tracked_rx) = mpsc::unbounded_channel::<String>();
-                let streamed = Arc::new(AtomicBool::new(false));
-                let flag = Arc::clone(&streamed);
-                let handle = tokio::spawn(async move {
-                    while let Some(chunk) = tracked_rx.recv().await {
-                        flag.store(true, Ordering::SeqCst);
-                        if sender.send(chunk).is_err() {
-                            break;
-                        }
-                    }
-                });
-                (Some(tracked_tx), Some(streamed), Some(handle))
-            }
-            None => (None, None, None),
-        };
-
         let completion = client
-            .chat_completion_prompt_with_stream(
+            .chat_completion_prompt_with_timeout_and_stream_tracked(
                 &target.model,
                 &synthesis_prompt,
                 Some(temperature),
-                synth_stream,
+                Duration::from_secs(timeouts.synthesizer_timeout_secs),
+                stream,
             )
             .await;
 
-        // Drain the forwarder so `streamed_flag` reflects every chunk that was
-        // produced before the call finished, whether it succeeded or failed.
-        if let Some(handle) = forwarder {
-            let _ = handle.await;
-        }
-
         match completion {
             Ok(completion) => Ok((completion.content, completion.streamed)),
-            Err(error) => Err(SynthesizerFailure {
-                streamed: streamed_flag
-                    .map(|flag| flag.load(Ordering::SeqCst))
-                    .unwrap_or(false),
-                error,
+            Err(failure) => Err(SynthesizerFailure {
+                error: failure.error,
+                streamed: failure.streamed,
             }),
         }
     }

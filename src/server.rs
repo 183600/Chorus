@@ -100,6 +100,7 @@ pub struct ChatResponse {
     pub workflow: Option<WorkflowExecutionDetails>,
 }
 
+#[cfg(test)]
 fn for_each_chunk(content: &str, max_len: usize, mut emit: impl FnMut(&str)) {
     if content.is_empty() {
         emit("");
@@ -132,15 +133,97 @@ fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
-fn chunk_events<F>(segment: &str, mut make_event: F) -> Vec<Result<Event, Infallible>>
+/// Lazily splits an owned stream segment into protocol-sized events.
+///
+/// Owning the segment lets each segment be turned into a stream without
+/// collecting a `Vec` first; every event is serialized only when polled.
+struct ChunkEvents<F> {
+    content: String,
+    max_len: usize,
+    start: usize,
+    pos: usize,
+    current_len: usize,
+    finished: bool,
+    make_event: F,
+}
+
+impl<F> ChunkEvents<F>
 where
     F: FnMut(&str) -> Result<Event, Infallible>,
 {
-    let mut events = Vec::new();
-    for_each_chunk(segment, STREAM_CHUNK_SIZE, |piece| {
-        events.push(make_event(piece));
-    });
-    events
+    fn new(content: String, max_len: usize, make_event: F) -> Self {
+        Self {
+            content,
+            max_len,
+            start: 0,
+            pos: 0,
+            current_len: 0,
+            finished: false,
+            make_event,
+        }
+    }
+}
+
+impl<F> Iterator for ChunkEvents<F>
+where
+    F: FnMut(&str) -> Result<Event, Infallible>,
+{
+    type Item = Result<Event, Infallible>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let content_len = self.content.len();
+        if content_len == 0 {
+            self.finished = true;
+            return Some((self.make_event)(""));
+        }
+
+        while self.pos < content_len {
+            let ch = self.content[self.pos..]
+                .chars()
+                .next()
+                .expect("chunk scanning stays on char boundaries");
+            let ch_len = ch.len_utf8();
+            self.current_len += ch_len;
+            let end = self.pos + ch_len;
+            self.pos = end;
+
+            if ch == '\n' || self.current_len >= self.max_len {
+                let start = self.start;
+                self.start = end;
+                self.current_len = 0;
+                let Self {
+                    content,
+                    make_event,
+                    ..
+                } = self;
+                return Some(make_event(&content[start..end]));
+            }
+        }
+
+        self.finished = true;
+        if self.start < content_len {
+            let start = self.start;
+            self.start = content_len;
+            let Self {
+                content,
+                make_event,
+                ..
+            } = self;
+            return Some(make_event(&content[start..]));
+        }
+        None
+    }
+}
+
+fn chunk_events<F>(segment: String, make_event: F) -> ChunkEvents<F>
+where
+    F: FnMut(&str) -> Result<Event, Infallible>,
+{
+    ChunkEvents::new(segment, STREAM_CHUNK_SIZE, make_event)
 }
 
 fn build_prompt_from_messages(messages: &[Message]) -> String {
@@ -438,7 +521,7 @@ async fn generate(
                 move |segment| {
                     let model_name = Arc::clone(&model_name);
                     let created_at = Arc::clone(&created_at);
-                    stream::iter(chunk_events(&segment, move |piece| {
+                    stream::iter(chunk_events(segment, move |piece| {
                         Ok(Event::default()
                             .json_data(GenerateStreamChunk {
                                 created_at: &created_at,
@@ -547,7 +630,7 @@ async fn chat(
                 move |segment| {
                     let model_name = Arc::clone(&model_name);
                     let created_at = Arc::clone(&created_at);
-                    stream::iter(chunk_events(&segment, move |piece| {
+                    stream::iter(chunk_events(segment, move |piece| {
                         Ok(Event::default()
                             .json_data(ChatStreamChunk {
                                 created_at: &created_at,
@@ -694,7 +777,7 @@ async fn openai_chat_completions(
                 move |segment| {
                     let id = Arc::clone(&id);
                     let model_name = Arc::clone(&model_name);
-                    stream::iter(chunk_events(&segment, move |piece| {
+                    stream::iter(chunk_events(segment, move |piece| {
                         Ok(Event::default()
                             .json_data(OpenAiChatStreamChunk {
                                 choices: [OpenAiChatChoice {
@@ -843,7 +926,7 @@ async fn openai_completions(
                 move |segment| {
                     let id = Arc::clone(&id);
                     let model_name = Arc::clone(&model_name);
-                    stream::iter(chunk_events(&segment, move |piece| {
+                    stream::iter(chunk_events(segment, move |piece| {
                         Ok(Event::default()
                             .json_data(OpenAiCompletionStreamChunk {
                                 choices: [OpenAiCompletionChoice {
@@ -1205,7 +1288,7 @@ async fn responses(
                     let resp_id = Arc::clone(&resp_id);
                     let model_name = Arc::clone(&model_name);
                     let content_index = Arc::clone(&content_index);
-                    stream::iter(chunk_events(&segment, move |piece| {
+                    stream::iter(chunk_events(segment, move |piece| {
                         let index = content_index.fetch_add(1, Ordering::Relaxed);
                         Ok(Event::default()
                             .event("response.output_text.delta")
@@ -1551,6 +1634,52 @@ mod stream_payload_tests {
                     case,
                     max_len
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_chunk_events_match_reference_implementation() {
+        use std::sync::Mutex;
+
+        let cases: Vec<String> = vec![
+            String::new(),
+            "hello world".to_string(),
+            "line1\nline2\n".to_string(),
+            "\n\n".to_string(),
+            "中文测试内容比较长一些".to_string(),
+            "x".repeat(500),
+            "a\nbbb\nccccc".to_string(),
+            "emoji 😀😀😀 tail".to_string(),
+            "a".repeat(STREAM_CHUNK_SIZE * 2 + 1),
+        ];
+
+        for case in &cases {
+            for max_len in [1usize, 3, 7, STREAM_CHUNK_SIZE] {
+                let collected: Mutex<Vec<String>> = Mutex::new(Vec::new());
+                let events = ChunkEvents::new(case.clone(), max_len, |piece: &str| {
+                    collected
+                        .lock()
+                        .expect("collector lock")
+                        .push(piece.to_string());
+                    Ok(Event::default().data(piece))
+                });
+
+                let mut produced = 0usize;
+                for event in events {
+                    let _ = event.expect("chunk events are infallible");
+                    produced += 1;
+                }
+
+                let collected = collected.into_inner().expect("collector lock");
+                assert_eq!(
+                    collected,
+                    reference_chunk_text(case, max_len),
+                    "case {:?} with max_len {}",
+                    case,
+                    max_len
+                );
+                assert_eq!(produced, collected.len());
             }
         }
     }

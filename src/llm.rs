@@ -46,15 +46,51 @@ pub struct CompletionResult {
     pub streamed: bool,
 }
 
-/// Error raised while consuming an SSE response body.
+/// Error raised while producing a completion.
 ///
 /// Carries whether any content had already been forwarded to the caller so the
 /// retry loop can decide if the request may be safely retried without
 /// duplicating partial output.
 #[derive(Debug)]
-struct StreamFailure {
-    error: reqwest::Error,
-    streamed: bool,
+pub(crate) struct StreamFailure {
+    pub(crate) error: anyhow::Error,
+    pub(crate) streamed: bool,
+}
+
+impl StreamFailure {
+    fn is_retryable(&self) -> bool {
+        self.error
+            .downcast_ref::<reqwest::Error>()
+            .map(is_retryable_reqwest_error)
+            .unwrap_or(false)
+    }
+}
+
+impl From<reqwest::Error> for StreamFailure {
+    fn from(error: reqwest::Error) -> Self {
+        Self {
+            error: error.into(),
+            streamed: false,
+        }
+    }
+}
+
+impl From<serde_json::Error> for StreamFailure {
+    fn from(error: serde_json::Error) -> Self {
+        Self {
+            error: error.into(),
+            streamed: false,
+        }
+    }
+}
+
+impl From<anyhow::Error> for StreamFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            streamed: false,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -138,6 +174,7 @@ pub struct LLMClient {
     authorization: String,
     chat_completions_url: String,
     retry: RetryPolicy,
+    timeout: Duration,
 }
 
 impl LLMClient {
@@ -151,8 +188,10 @@ impl LLMClient {
         timeout_secs: u64,
         retry: RetryPolicy,
     ) -> Result<Self> {
+        // The timeout is applied per request (rather than baked into the
+        // client) so a single connection pool can be shared by callers that
+        // use different per-stage timeouts.
         let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .with_context(|| format!("Failed to build HTTP client for {}", api_base))?;
 
@@ -165,6 +204,7 @@ impl LLMClient {
             authorization: format!("Bearer {}", api_key),
             chat_completions_url,
             retry,
+            timeout: Duration::from_secs(timeout_secs),
         })
     }
 
@@ -183,6 +223,7 @@ impl LLMClient {
 
     /// Sends a single-user-message chat completion while borrowing the prompt
     /// instead of cloning it into an owned [`ChatMessage`].
+    #[allow(dead_code)]
     pub async fn chat_completion_prompt(
         &self,
         model: &str,
@@ -195,6 +236,7 @@ impl LLMClient {
         Ok(result.content)
     }
 
+    #[allow(dead_code)]
     pub async fn chat_completion_prompt_with_stream(
         &self,
         model: &str,
@@ -202,6 +244,43 @@ impl LLMClient {
         temperature: Option<f32>,
         stream: Option<UnboundedSender<String>>,
     ) -> Result<CompletionResult> {
+        let timeout = self.timeout;
+        self.chat_completion_prompt_with_timeout_and_stream_tracked(
+            model, prompt, temperature, timeout, stream,
+        )
+        .await
+        .map_err(|failure| failure.error)
+    }
+
+    /// Like [`LLMClient::chat_completion_prompt`], but overrides the request
+    /// timeout so shared clients can serve stages with different timeouts.
+    pub(crate) async fn chat_completion_prompt_with_timeout(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: Option<f32>,
+        timeout: Duration,
+    ) -> Result<String> {
+        let result = self
+            .chat_completion_prompt_with_timeout_and_stream_tracked(
+                model, prompt, temperature, timeout, None,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
+        Ok(result.content)
+    }
+
+    /// Preserves whether any content had been forwarded when the call failed,
+    /// so callers can avoid spawning a separate forwarding task just to
+    /// observe that flag while streaming.
+    pub(crate) async fn chat_completion_prompt_with_timeout_and_stream_tracked(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: Option<f32>,
+        timeout: Duration,
+        stream: Option<UnboundedSender<String>>,
+    ) -> std::result::Result<CompletionResult, StreamFailure> {
         let messages = [BorrowedChatMessage {
             content: prompt,
             role: "user",
@@ -212,7 +291,7 @@ impl LLMClient {
             stream: stream.is_some(),
             temperature: temperature.map(f64::from),
         };
-        self.send_chat_request(&request, model, stream).await
+        self.send_chat_request(&request, model, timeout, stream).await
     }
 
     #[allow(dead_code)]
@@ -229,15 +308,18 @@ impl LLMClient {
             stream: stream.is_some(),
             temperature: temperature.map(f64::from),
         };
-        self.send_chat_request(&request, model, stream).await
+        self.send_chat_request(&request, model, self.timeout, stream)
+            .await
+            .map_err(|failure| failure.error)
     }
 
     async fn send_chat_request<R: Serialize>(
         &self,
         request: &R,
         model: &str,
+        timeout: Duration,
         stream: Option<UnboundedSender<String>>,
-    ) -> Result<CompletionResult> {
+    ) -> std::result::Result<CompletionResult, StreamFailure> {
         let stream_was_requested = stream.is_some();
 
         tracing::debug!(
@@ -260,6 +342,7 @@ impl LLMClient {
                 .post(&self.chat_completions_url)
                 .header("Authorization", &self.authorization)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .timeout(timeout)
                 .body(body.clone())
                 .send()
                 .await
@@ -297,17 +380,15 @@ impl LLMClient {
                     "LLM API request failed with status {}: {}",
                     status,
                     error_text
-                ));
+                )
+                .into());
             }
 
             if stream_was_requested && response_is_event_stream(&response) {
                 match self.consume_event_stream(response, stream.clone()).await {
                     Ok(result) => return Ok(result),
                     Err(failure) => {
-                        if !failure.streamed
-                            && self.can_retry(attempt)
-                            && is_retryable_reqwest_error(&failure.error)
-                        {
+                        if !failure.streamed && self.can_retry(attempt) && failure.is_retryable() {
                             self.wait_before_retry(
                                 attempt,
                                 None,
@@ -317,7 +398,7 @@ impl LLMClient {
                             .await;
                             continue;
                         }
-                        return Err(failure.error.into());
+                        return Err(failure);
                     }
                 }
             }
@@ -351,10 +432,11 @@ impl LLMClient {
                     self.api_base,
                     model,
                     err_msg
-                ));
+                )
+                .into());
             }
 
-            return Err(anyhow!("LLM response missing content field: {}", v));
+            return Err(anyhow!("LLM response missing content field: {}", v).into());
         }
     }
 
@@ -398,10 +480,23 @@ impl LLMClient {
         while let Some(item) = byte_stream.next().await {
             let chunk = match item {
                 Ok(chunk) => chunk,
-                Err(error) => return Err(StreamFailure { error, streamed }),
+                Err(error) => {
+                    return Err(StreamFailure {
+                        error: error.into(),
+                        streamed,
+                    })
+                }
             };
-            pending.extend_from_slice(&chunk);
-            append_valid_utf8(&mut pending, &mut buffer);
+            // Chunks that are already valid UTF-8 (the common case when no
+            // multi-byte character straddles the boundary) can be appended to
+            // the buffer directly instead of being staged through `pending`.
+            match std::str::from_utf8(&chunk) {
+                Ok(text) if pending.is_empty() => buffer.push_str(text),
+                _ => {
+                    pending.extend_from_slice(&chunk);
+                    append_valid_utf8(&mut pending, &mut buffer);
+                }
+            }
 
             loop {
                 let Some((idx, sep_len)) = find_event_separator(&buffer[cursor..]) else {
@@ -417,24 +512,39 @@ impl LLMClient {
 
                 let event = event.strip_suffix('\r').unwrap_or(event);
 
-                data_payload.clear();
-                for line in event.lines() {
-                    if let Some(rest) = line.strip_prefix("data:") {
-                        if !data_payload.is_empty() {
-                            data_payload.push('\n');
+                // The overwhelmingly common case is a single `data:` line,
+                // whose payload can be borrowed straight from the buffer
+                // instead of being copied into the scratch string.
+                let trimmed = match single_data_payload(event) {
+                    Some(payload) => {
+                        let payload = payload.trim();
+                        if payload.is_empty() {
+                            continue;
                         }
-                        data_payload.push_str(rest.trim_start());
+                        payload
                     }
-                }
+                    None => {
+                        data_payload.clear();
+                        for line in event.lines() {
+                            if let Some(rest) = line.strip_prefix("data:") {
+                                if !data_payload.is_empty() {
+                                    data_payload.push('\n');
+                                }
+                                data_payload.push_str(rest.trim_start());
+                            }
+                        }
 
-                if data_payload.is_empty() {
-                    continue;
-                }
+                        if data_payload.is_empty() {
+                            continue;
+                        }
 
-                let trimmed = data_payload.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
+                        let payload = data_payload.trim();
+                        if payload.is_empty() {
+                            continue;
+                        }
+                        payload
+                    }
+                };
 
                 if trimmed == "[DONE]" {
                     return Ok(CompletionResult {
@@ -655,6 +765,21 @@ fn append_valid_utf8(pending: &mut Vec<u8>, out: &mut String) {
             None => return,
         }
     }
+}
+
+/// Returns the payload of `event` when it contains exactly one `data:` line,
+/// `None` when it contains several (which need to be joined) or none at all.
+fn single_data_payload(event: &str) -> Option<&str> {
+    let mut found: Option<&str> = None;
+    for line in event.lines() {
+        if let Some(rest) = line.strip_prefix("data:") {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(rest);
+        }
+    }
+    found
 }
 
 fn find_event_separator(buffer: &str) -> Option<(usize, usize)> {
