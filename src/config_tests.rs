@@ -1323,6 +1323,75 @@ synthesizer_timeout_secs = 90
     }
 
     #[test]
+    fn migration_preserves_plain_string_json_worker_depth() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "chorus_plain_string_depth_migration_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.toml");
+
+        let config_content = r#"
+workflow-integration = '''
+{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"},
+  "nested_worker_depth": 2
+}
+'''
+
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+        fs::write(&config_path, config_content).unwrap();
+
+        Config::migrate_config_if_needed(&config_path).unwrap();
+
+        let migrated = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            migrated.contains("nested_worker_depth = 2"),
+            "migrated config should keep nested_worker_depth, got:\n{}",
+            migrated
+        );
+
+        let cfg = Config::load(&config_path.to_string_lossy()).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(2));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+        match &cfg.workflow_integration.workers[0] {
+            WorkflowWorker::Workflow(plan) => {
+                assert_eq!(plan.workers.len(), 2);
+                for worker in &plan.workers {
+                    match worker {
+                        WorkflowWorker::Model(target) => assert_eq!(target.model, "m1"),
+                        _ => panic!("Expected model worker in replicated nested workflow"),
+                    }
+                }
+            }
+            _ => panic!("Expected replicated nested workflow after reload"),
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn worker_concurrency_defaults_to_none_when_absent() {
         let cfg: Config = toml::from_str(CFG_LEGACY).unwrap();
         assert_eq!(cfg.workflow.worker_concurrency, None);
@@ -1524,5 +1593,159 @@ max_retries = 0
             crate::config::DEFAULT_RETRY_MAX_BACKOFF_MS
         );
         assert_eq!(cfg.workflow.retry.to_retry_policy().max_retries, 0);
+    }
+
+    #[test]
+    fn plain_string_workflow_plan_applies_worker_replication() {
+        let cfg_str = r#"
+workflow-integration = '''
+{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"},
+  "nested_worker_depth": 2
+}
+'''
+
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
+        let cfg: Config = toml::from_str(cfg_str).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(2));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+
+        match &cfg.workflow_integration.workers[0] {
+            WorkflowWorker::Workflow(plan) => {
+                assert_eq!(plan.workers.len(), 2);
+                for worker in &plan.workers {
+                    match worker {
+                        WorkflowWorker::Model(target) => assert_eq!(target.model, "m1"),
+                        _ => panic!("Expected model worker in replicated nested workflow"),
+                    }
+                }
+            }
+            _ => panic!("Expected nested workflow after replication"),
+        }
+    }
+
+    #[test]
+    fn plain_string_workflow_plan_with_depth_one_keeps_model_workers() {
+        let cfg_str = r#"
+workflow-integration = '''
+{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"},
+  "nested_worker_depth": 1
+}
+'''
+
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
+        let cfg: Config = toml::from_str(cfg_str).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(1));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+        match &cfg.workflow_integration.workers[0] {
+            WorkflowWorker::Model(target) => assert_eq!(target.model, "m1"),
+            _ => panic!("depth 1 must not replicate workers"),
+        }
+    }
+
+    #[test]
+    fn json_wrapper_falls_back_to_embedded_nested_worker_depth() {
+        const CFG_EMBEDDED_DEPTH: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+json = """
+{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"},
+  "nested_worker_depth": 2
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
+        let cfg: Config = toml::from_str(CFG_EMBEDDED_DEPTH).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(2));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+        match &cfg.workflow_integration.workers[0] {
+            WorkflowWorker::Workflow(plan) => assert_eq!(plan.workers.len(), 2),
+            _ => panic!("Expected nested workflow after replication"),
+        }
+    }
+
+    #[test]
+    fn json_wrapper_table_depth_takes_precedence_over_embedded_depth() {
+        const CFG_TABLE_DEPTH: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://api.example.com/v1"
+api_key = "k"
+name = "m1"
+
+[workflow-integration]
+nested_worker_depth = 1
+json = """
+{
+  "analyzer": {"ref": "m1"},
+  "workers": [{"name": "m1"}],
+  "synthesizer": {"ref": "m1"},
+  "nested_worker_depth": 2
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
+        let cfg: Config = toml::from_str(CFG_TABLE_DEPTH).unwrap();
+        assert_eq!(cfg.workflow_integration.nested_worker_depth, Some(1));
+        assert_eq!(cfg.workflow_integration.workers.len(), 1);
+        match &cfg.workflow_integration.workers[0] {
+            WorkflowWorker::Model(target) => assert_eq!(target.model, "m1"),
+            _ => panic!("table depth must take precedence over embedded depth"),
+        }
     }
 }

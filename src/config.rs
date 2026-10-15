@@ -682,12 +682,17 @@ where
             let mut plan = WorkflowPlan::from_json_str(&wrapper.json).map_err(|err| {
                 DeError::custom(format!("Failed to parse workflow json: {}", err))
             })?;
-            plan.nested_worker_depth = wrapper.nested_worker_depth;
+            plan.nested_worker_depth = wrapper.nested_worker_depth.or(plan.nested_worker_depth);
             plan.apply_worker_replication();
             Ok(plan)
         }
-        PlanInput::PlainString(json) => WorkflowPlan::from_json_str(&json)
-            .map_err(|err| DeError::custom(format!("Failed to parse workflow json: {}", err))),
+        PlanInput::PlainString(json) => {
+            let mut plan = WorkflowPlan::from_json_str(&json).map_err(|err| {
+                DeError::custom(format!("Failed to parse workflow json: {}", err))
+            })?;
+            plan.apply_worker_replication();
+            Ok(plan)
+        }
         PlanInput::Plan(mut plan) => {
             plan.validate_structure().map_err(|err| {
                 DeError::custom(format!("Failed to parse workflow json: {}", err))
