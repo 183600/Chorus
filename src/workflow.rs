@@ -1,13 +1,13 @@
 use crate::config::{Config, ModelConfig, WorkflowModelTarget, WorkflowPlan, WorkflowWorker};
-use crate::llm::{parse_temperature_from_response, ChatMessage, LLMClient, RetryPolicy};
+use crate::llm::{parse_temperature_from_response, LLMClient, RetryPolicy};
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use futures::stream::{self, StreamExt as _};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
-use tokio::sync::{mpsc::UnboundedSender, RwLock};
+use std::sync::{Arc, RwLock};
+use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
 const DEFAULT_TEMPERATURE: f32 = 1.4;
@@ -220,7 +220,10 @@ impl WorkflowEngine {
         timeout_secs: u64,
     ) -> Result<Arc<LLMClient>> {
         {
-            let clients = self.llm_clients.read().await;
+            let clients = self
+                .llm_clients
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
             if let Some(client) = Self::find_cached_client(&clients, api_base, api_key, timeout_secs)
             {
                 return Ok(client);
@@ -234,7 +237,10 @@ impl WorkflowEngine {
             self.retry_policy,
         )?);
 
-        let mut clients = self.llm_clients.write().await;
+        let mut clients = self
+            .llm_clients
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
         if let Some(client) = Self::find_cached_client(&clients, api_base, api_key, timeout_secs) {
             return Ok(client);
         }
@@ -587,13 +593,8 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             prompt
         );
 
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: analysis_prompt,
-        }];
-
         let response = client
-            .chat_completion(&target.model, messages, Some(0.3))
+            .chat_completion_prompt(&target.model, &analysis_prompt, Some(0.3))
             .await?;
 
         let temperature = parse_temperature_from_response(&response);
@@ -648,9 +649,8 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         analyzer_auto: bool,
         depth: usize,
     ) -> Result<Vec<WorkerDetails>> {
-        let plan_label = plan.label();
-
         if plan.workers.is_empty() {
+            let plan_label = plan.label();
             tracing::error!(
                 plan = %plan_label,
                 depth,
@@ -693,7 +693,8 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
 
             let mut message = format!(
                 "All worker nodes failed at depth {} for plan {}",
-                depth, plan_label
+                depth,
+                plan.label()
             );
             if !worker_errors.is_empty() {
                 message.push_str(". Worker errors: ");
@@ -863,11 +864,6 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             )
             .await?;
 
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        }];
-
         tracing::debug!(
             "Using temperature {} for worker {} at depth {}",
             temperature,
@@ -876,7 +872,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         let response = client
-            .chat_completion(&target.model, messages, Some(temperature))
+            .chat_completion_prompt(&target.model, prompt, Some(temperature))
             .await?;
 
         tracing::debug!(
@@ -1012,13 +1008,8 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             只需输出 JSON 对象。\n",
         );
 
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: selector_prompt,
-        }];
-
         let raw_output = match client
-            .chat_completion(&target.model, messages, Some(temperature))
+            .chat_completion_prompt(&target.model, &selector_prompt, Some(temperature))
             .await
         {
             Ok(content) => content,
@@ -1190,11 +1181,6 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
             );
         }
 
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: synthesis_prompt,
-        }];
-
         let temperature = self.resolve_synthesizer_temperature(target, model_config, depth);
 
         tracing::debug!(
@@ -1205,7 +1191,12 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         );
 
         let completion = client
-            .chat_completion_with_stream(&target.model, messages, Some(temperature), stream)
+            .chat_completion_prompt_with_stream(
+                &target.model,
+                &synthesis_prompt,
+                Some(temperature),
+                stream,
+            )
             .await?;
 
         Ok((completion.content, completion.streamed))

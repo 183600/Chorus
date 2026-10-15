@@ -3,7 +3,7 @@ use crate::workflow::{StreamCallback, WorkflowEngine, WorkflowExecutionDetails};
 use anyhow::Result;
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bytes::Bytes;
 use futures::{stream, StreamExt};
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ const STREAM_CHUNK_SIZE: usize = 120;
 pub struct AppState {
     config: Arc<Config>,
     workflow_engine: WorkflowEngine,
+    health_body: Bytes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -343,9 +345,16 @@ pub async fn start_server(config: Arc<Config>) -> Result<()> {
     let workflow_engine = WorkflowEngine::from_shared(Arc::clone(&config));
     let addr = format!("{}:{}", config.server.host, config.server.port);
 
+    let health_body = Bytes::from(serde_json::to_vec(&serde_json::json!({
+        "status": "ok",
+        "service": "Chorus",
+        "version": "0.1.0"
+    }))?);
+
     let state = Arc::new(AppState {
         config,
         workflow_engine,
+        health_body,
     });
 
     let app = Router::new()
@@ -375,12 +384,13 @@ pub async fn start_server(config: Arc<Config>) -> Result<()> {
     Ok(())
 }
 
-async fn health_check() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "ok",
-        "service": "Chorus",
-        "version": "0.1.0"
-    }))
+async fn health_check(State(state): State<SharedState>) -> Response {
+    let mut response = Response::new(axum::body::Body::from(state.health_body.clone()));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 async fn generate(
@@ -448,8 +458,8 @@ async fn generate(
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
                         let mut payload = serde_json::json!({
-                            "model": model_name.clone(),
-                            "created_at": created_at.clone(),
+                            "model": model_name,
+                            "created_at": created_at,
                             "response": "",
                             "done": true,
                         });
@@ -459,8 +469,8 @@ async fn generate(
                     Ok(Err(err)) => {
                         let error_message = err.error.to_string();
                         let payload = serde_json::json!({
-                            "model": model_name.clone(),
-                            "created_at": created_at.clone(),
+                            "model": model_name,
+                            "created_at": created_at,
                             "done": true,
                             "error": error_message,
                         });
@@ -468,8 +478,8 @@ async fn generate(
                     }
                     Err(_) => {
                         let payload = serde_json::json!({
-                            "model": model_name.clone(),
-                            "created_at": created_at.clone(),
+                            "model": model_name,
+                            "created_at": created_at,
                             "done": true,
                             "error": "stream cancelled",
                         });
@@ -560,8 +570,8 @@ async fn chat(
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
                         let mut payload = serde_json::json!({
-                            "model": model_name.clone(),
-                            "created_at": created_at.clone(),
+                            "model": model_name,
+                            "created_at": created_at,
                             "message": {
                                 "role": "assistant",
                                 "content": "",
@@ -574,8 +584,8 @@ async fn chat(
                     Ok(Err(err)) => {
                         let error_message = err.error.to_string();
                         let payload = serde_json::json!({
-                            "model": model_name.clone(),
-                            "created_at": created_at.clone(),
+                            "model": model_name,
+                            "created_at": created_at,
                             "message": {
                                 "role": "assistant",
                                 "content": "",
@@ -587,8 +597,8 @@ async fn chat(
                     }
                     Err(_) => {
                         let payload = serde_json::json!({
-                            "model": model_name.clone(),
-                            "created_at": created_at.clone(),
+                            "model": model_name,
+                            "created_at": created_at,
                             "message": {
                                 "role": "assistant",
                                 "content": "",
@@ -712,7 +722,7 @@ async fn openai_chat_completions(
                             "id": id.clone(),
                             "object": "chat.completion.chunk",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "choices": [ {
                                 "index": 0,
                                 "delta": serde_json::json!({}),
@@ -728,7 +738,7 @@ async fn openai_chat_completions(
                             "id": id.clone(),
                             "object": "chat.completion.chunk",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "choices": [ {
                                 "index": 0,
                                 "delta": serde_json::json!({}),
@@ -743,7 +753,7 @@ async fn openai_chat_completions(
                             "id": id.clone(),
                             "object": "chat.completion.chunk",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "choices": [ {
                                 "index": 0,
                                 "delta": serde_json::json!({}),
@@ -862,7 +872,7 @@ async fn openai_completions(
                             "id": id.clone(),
                             "object": "text_completion",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "choices": [ {
                                 "text": "",
                                 "index": 0,
@@ -879,7 +889,7 @@ async fn openai_completions(
                             "id": id.clone(),
                             "object": "text_completion",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "choices": [ {
                                 "text": "",
                                 "index": 0,
@@ -895,7 +905,7 @@ async fn openai_completions(
                             "id": id.clone(),
                             "object": "text_completion",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "choices": [ {
                                 "text": "",
                                 "index": 0,
@@ -1231,13 +1241,13 @@ async fn responses(
                             response_text.len()
                         );
                         let mut payload = serde_json::json!({
-                            "id": resp_id.clone(),
+                            "id": resp_id,
                             "object": "response",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "status": "completed",
                             "output": [ {
-                                "id": msg_id.clone(),
+                                "id": msg_id,
                                 "type": "message",
                                 "role": "assistant",
                                 "content": [ { "type": "output_text", "text": response_text } ]
@@ -1260,10 +1270,10 @@ async fn responses(
                             error_message
                         );
                         let payload = serde_json::json!({
-                            "id": resp_id.clone(),
+                            "id": resp_id,
                             "object": "response.error",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "status": "failed",
                             "error": error_message,
                         });
@@ -1280,10 +1290,10 @@ async fn responses(
                             prompt_len
                         );
                         let payload = serde_json::json!({
-                            "id": resp_id.clone(),
+                            "id": resp_id,
                             "object": "response.error",
                             "created": created,
-                            "model": model_name.clone(),
+                            "model": model_name,
                             "status": "failed",
                             "error": "stream cancelled",
                         });

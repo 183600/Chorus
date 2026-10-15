@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -46,8 +47,23 @@ pub struct CompletionResult {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 struct ChatCompletionRequest<'a> {
     messages: &'a [ChatMessage],
+    model: &'a str,
+    stream: bool,
+    temperature: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct BorrowedChatMessage<'a> {
+    content: &'a str,
+    role: &'a str,
+}
+
+#[derive(Serialize)]
+struct BorrowedChatCompletionRequest<'a> {
+    messages: &'a [BorrowedChatMessage<'a>],
     model: &'a str,
     stream: bool,
     temperature: Option<f64>,
@@ -141,6 +157,7 @@ impl LLMClient {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn chat_completion(
         &self,
         model: &str,
@@ -153,6 +170,41 @@ impl LLMClient {
         Ok(result.content)
     }
 
+    /// Sends a single-user-message chat completion while borrowing the prompt
+    /// instead of cloning it into an owned [`ChatMessage`].
+    pub async fn chat_completion_prompt(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: Option<f32>,
+    ) -> Result<String> {
+        let result = self
+            .chat_completion_prompt_with_stream(model, prompt, temperature, None)
+            .await?;
+        Ok(result.content)
+    }
+
+    pub async fn chat_completion_prompt_with_stream(
+        &self,
+        model: &str,
+        prompt: &str,
+        temperature: Option<f32>,
+        stream: Option<UnboundedSender<String>>,
+    ) -> Result<CompletionResult> {
+        let messages = [BorrowedChatMessage {
+            content: prompt,
+            role: "user",
+        }];
+        let request = BorrowedChatCompletionRequest {
+            messages: &messages,
+            model,
+            stream: stream.is_some(),
+            temperature: temperature.map(f64::from),
+        };
+        self.send_chat_request(&request, model, stream).await
+    }
+
+    #[allow(dead_code)]
     pub async fn chat_completion_with_stream(
         &self,
         model: &str,
@@ -160,13 +212,22 @@ impl LLMClient {
         temperature: Option<f32>,
         stream: Option<UnboundedSender<String>>,
     ) -> Result<CompletionResult> {
-        let stream_was_requested = stream.is_some();
         let request = ChatCompletionRequest {
             messages: &messages,
             model,
-            stream: stream_was_requested,
+            stream: stream.is_some(),
             temperature: temperature.map(f64::from),
         };
+        self.send_chat_request(&request, model, stream).await
+    }
+
+    async fn send_chat_request<R: Serialize>(
+        &self,
+        request: &R,
+        model: &str,
+        stream: Option<UnboundedSender<String>>,
+    ) -> Result<CompletionResult> {
+        let stream_was_requested = stream.is_some();
 
         tracing::debug!(
             "Calling LLM API: {} with model: {}",
@@ -174,10 +235,10 @@ impl LLMClient {
             model
         );
         if tracing::enabled!(tracing::Level::DEBUG) {
-            tracing::debug!("Request body: {}", serde_json::to_string_pretty(&request)?);
+            tracing::debug!("Request body: {}", serde_json::to_string_pretty(request)?);
         }
 
-        let body = serde_json::to_vec(&request)?;
+        let body = Bytes::from(serde_json::to_vec(request)?);
         let mut attempt: u32 = 0;
 
         loop {
@@ -302,6 +363,7 @@ impl LLMClient {
         let mut buffer = String::new();
         let mut pending = Vec::new();
         let mut cursor = 0usize;
+        let mut data_payload = String::new();
         let mut byte_stream = response.bytes_stream();
 
         while let Some(item) = byte_stream.next().await {
@@ -323,7 +385,7 @@ impl LLMClient {
 
                 let event = event.strip_suffix('\r').unwrap_or(event);
 
-                let mut data_payload = String::new();
+                data_payload.clear();
                 for line in event.lines() {
                     if let Some(rest) = line.strip_prefix("data:") {
                         if !data_payload.is_empty() {
@@ -347,6 +409,21 @@ impl LLMClient {
                         content: final_text,
                         streamed,
                     });
+                }
+
+                if let FastStreamEvent::Text { text, finish } = fast_stream_event(trimmed) {
+                    final_text.push_str(text);
+                    streamed = true;
+                    if let Some(sender) = stream.as_ref() {
+                        let _ = sender.send(text.to_string());
+                    }
+                    if finish.is_some() {
+                        return Ok(CompletionResult {
+                            content: final_text,
+                            streamed,
+                        });
+                    }
+                    continue;
                 }
 
                 match serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -400,6 +477,85 @@ impl LLMClient {
             streamed,
         })
     }
+}
+
+/// Common OpenAI-compatible streaming delta shape.
+///
+/// Deserializing into borrowed strings avoids building a full
+/// `serde_json::Value` tree for every streamed token. Anything that does not
+/// fit this shape (non-string content, tool calls, message-shaped payloads,
+/// ...) is reported as `Unsupported` and handled by the generic `Value` path
+/// so behavior stays identical for all providers.
+#[derive(Deserialize)]
+struct FastStreamChunk<'a> {
+    #[serde(default, borrow)]
+    choices: Option<Vec<FastStreamChoice<'a>>>,
+}
+
+#[derive(Deserialize)]
+struct FastStreamChoice<'a> {
+    #[serde(default)]
+    delta: Option<FastStreamDelta<'a>>,
+    #[serde(default)]
+    text: Option<&'a str>,
+    #[serde(default)]
+    finish_reason: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct FastStreamDelta<'a> {
+    #[serde(default)]
+    content: Option<&'a str>,
+    #[serde(default)]
+    reasoning_content: Option<&'a str>,
+    #[serde(default)]
+    analysis: Option<&'a str>,
+    #[serde(default)]
+    reasoning: Option<&'a str>,
+}
+
+enum FastStreamEvent<'a> {
+    Text {
+        text: &'a str,
+        finish: Option<&'a str>,
+    },
+    Unsupported,
+}
+
+fn non_empty_str(text: Option<&str>) -> Option<&str> {
+    text.filter(|value| !value.is_empty())
+}
+
+fn fast_stream_event(payload: &str) -> FastStreamEvent<'_> {
+    let parsed: FastStreamChunk<'_> = match serde_json::from_str(payload) {
+        Ok(parsed) => parsed,
+        Err(_) => return FastStreamEvent::Unsupported,
+    };
+
+    let Some(choice) = parsed.choices.as_ref().and_then(|choices| choices.first()) else {
+        return FastStreamEvent::Unsupported;
+    };
+
+    let delta_text = choice.delta.as_ref().and_then(|delta| {
+        non_empty_str(delta.content)
+            .or_else(|| non_empty_str(delta.reasoning_content))
+            .or_else(|| non_empty_str(delta.analysis))
+            .or_else(|| non_empty_str(delta.reasoning))
+    });
+
+    let text = match delta_text {
+        Some(text) => text,
+        None => match choice.text.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) => text,
+            None => return FastStreamEvent::Unsupported,
+        },
+    };
+
+    let finish = choice
+        .finish_reason
+        .filter(|reason| !reason.is_empty() && *reason != "null");
+
+    FastStreamEvent::Text { text, finish }
 }
 
 fn response_is_event_stream(response: &reqwest::Response) -> bool {
@@ -1015,6 +1171,39 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_prompt_request_serializes_like_owned_messages() {
+        let prompt = "hello \"quoted\" 中文\nline";
+        let temperature = Some(0.3f32);
+
+        let borrowed_messages = [BorrowedChatMessage {
+            content: prompt,
+            role: "user",
+        }];
+        let borrowed = BorrowedChatCompletionRequest {
+            messages: &borrowed_messages,
+            model: "test-model",
+            stream: true,
+            temperature: temperature.map(f64::from),
+        };
+
+        let owned_messages = vec![ChatMessage {
+            content: prompt.to_string(),
+            role: "user".to_string(),
+        }];
+        let owned = ChatCompletionRequest {
+            messages: &owned_messages,
+            model: "test-model",
+            stream: true,
+            temperature: temperature.map(f64::from),
+        };
+
+        assert_eq!(
+            serde_json::to_vec(&borrowed).unwrap(),
+            serde_json::to_vec(&owned).unwrap()
+        );
+    }
+
+    #[test]
     fn append_valid_utf8_reassembles_split_multibyte_characters() {
         let full = "中文".as_bytes();
         let mut pending = Vec::new();
@@ -1041,6 +1230,94 @@ mod tests {
         append_valid_utf8(&mut pending, &mut out);
         assert_eq!(out, "\u{FFFD}a");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn fast_stream_event_matches_generic_value_path() {
+        let cases: [(&str, bool); 12] = [
+            (
+                r#"{"choices":[{"index":0,"delta":{"content":"hello"}}]}"#,
+                true,
+            ),
+            (
+                r#"{"choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}"#,
+                false,
+            ),
+            (
+                r#"{"choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}"#,
+                true,
+            ),
+            (
+                r#"{"choices":[{"index":0,"delta":{"content":"","reasoning":"why"}}]}"#,
+                true,
+            ),
+            (r#"{"choices":[{"index":0,"delta":{"analysis":"step"}}]}"#, true),
+            (r#"{"choices":[{"text":" plain "}]}"#, true),
+            (
+                r#"{"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}"#,
+                true,
+            ),
+            (r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#, false),
+            (
+                r#"{"choices":[{"delta":{"content":"x"},"finish_reason":null}]}"#,
+                true,
+            ),
+            (
+                r#"{"choices":[{"delta":{"content":"x"},"finish_reason":"null"}]}"#,
+                true,
+            ),
+            (r#"{"choices":[]}"#, false),
+            (r#"{"error":{"message":"bad"}}"#, false),
+        ];
+
+        for (case, expect_fast) in cases {
+            let value: serde_json::Value = serde_json::from_str(case).unwrap();
+            let expected_text =
+                extract_stream_content(&value).or_else(|| extract_completion_text(&value));
+            let expected_finish = value
+                .get("choices")
+                .and_then(|c| c.get(0))
+                .and_then(|c0| c0.get("finish_reason"))
+                .and_then(|r| r.as_str())
+                .filter(|reason| !reason.is_empty() && *reason != "null");
+
+            match fast_stream_event(case) {
+                FastStreamEvent::Text { text, finish } => {
+                    assert!(expect_fast, "fast path unexpectedly handled {}", case);
+                    assert_eq!(
+                        Some(text.to_string()),
+                        expected_text,
+                        "fast path text diverged for {}",
+                        case
+                    );
+                    assert_eq!(finish, expected_finish, "fast path finish diverged for {}", case);
+                }
+                FastStreamEvent::Unsupported => {
+                    assert!(!expect_fast, "fast path unexpectedly deferred {}", case);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fast_stream_event_defers_shapes_it_does_not_cover() {
+        let cases = [
+            r#"{"choices":[{"message":{"content":"msg"}}]}"#,
+            r#"{"output_text":"out"}"#,
+            r#"{"choices":[{"delta":{"content":[{"text":"a"}]}}]}"#,
+            r#"{"choices":[{"delta":{"content":{"text":"a"}}}]}"#,
+            r#"{"choices":[{"delta":{"content":123}}]}"#,
+            r#"{"choices":"nope"}"#,
+            "not json at all",
+        ];
+
+        for case in cases {
+            assert!(
+                matches!(fast_stream_event(case), FastStreamEvent::Unsupported),
+                "fast path must defer unsupported shape: {}",
+                case
+            );
+        }
     }
 
     #[test]
