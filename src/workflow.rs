@@ -62,30 +62,38 @@ pub struct WorkflowExecutionDetails {
     pub synthesizer: Option<SynthesizerDetails>,
 }
 
-fn serialize_f32_as_f64<S>(value: &f32, serializer: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_f64(*value as f64)
-}
-
-fn serialize_optional_f32_as_f64<S>(
-    value: &Option<f32>,
+/// Serializes workflow details the way the `serde_json::Value` based payloads
+/// used to: f32 temperatures appear in their widened f64 form
+/// (`1.4` -> `1.399999976158142`). The typed `/v1` responses and the streaming
+/// chunks historically emitted that representation, so it is preserved here.
+pub fn serialize_workflow_widened<S>(
+    workflow: &Option<WorkflowExecutionDetails>,
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    match value {
-        Some(inner) => serializer.serialize_some(&(*inner as f64)),
-        None => serializer.serialize_none(),
-    }
+    serde_json::to_value(workflow)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
+}
+
+/// Borrowed variant of [`serialize_workflow_widened`] for streaming chunks.
+pub fn serialize_borrowed_workflow_widened<S>(
+    workflow: &Option<&WorkflowExecutionDetails>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serde_json::to_value(workflow)
+        .map_err(serde::ser::Error::custom)?
+        .serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzerDetails {
     pub model: String,
-    #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
     pub auto_temperature: bool,
 }
@@ -93,7 +101,6 @@ pub struct AnalyzerDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerDetails {
     pub name: String,
-    #[serde(serialize_with = "serialize_optional_f32_as_f64")]
     pub temperature: Option<f32>,
     pub response: Option<String>,
     pub success: bool,
@@ -104,7 +111,6 @@ pub struct WorkerDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectorDetails {
     pub model: String,
-    #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_index: Option<usize>,
@@ -124,7 +130,6 @@ pub struct SelectorDetails {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SynthesizerDetails {
     pub model: String,
-    #[serde(serialize_with = "serialize_f32_as_f64")]
     pub temperature: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1870,8 +1875,8 @@ mod tests {
     }
 
     #[test]
-    fn execution_detail_temperatures_serialize_like_value_path() {
-        let legacy_temperature = serde_json::json!({ "temperature": 1.4f32 })["temperature"].to_string();
+    fn execution_detail_temperatures_keep_native_f32_precision() {
+        let native_temperature = serde_json::to_string(&1.4f32).unwrap();
 
         let analyzer = AnalyzerDetails {
             model: "m".to_string(),
@@ -1880,10 +1885,10 @@ mod tests {
         };
         let serialized = serde_json::to_string(&analyzer).unwrap();
         assert!(
-            serialized.contains(&format!("\"temperature\":{}", legacy_temperature)),
-            "analyzer temperature serialized as {} (expected legacy {})",
+            serialized.contains(&format!("\"temperature\":{}", native_temperature)),
+            "analyzer temperature serialized as {} (expected native {})",
             serialized,
-            legacy_temperature
+            native_temperature
         );
 
         let synthesizer = SynthesizerDetails {
@@ -1893,10 +1898,10 @@ mod tests {
         };
         let serialized = serde_json::to_string(&synthesizer).unwrap();
         assert!(
-            serialized.contains(&format!("\"temperature\":{}", legacy_temperature)),
-            "synthesizer temperature serialized as {} (expected legacy {})",
+            serialized.contains(&format!("\"temperature\":{}", native_temperature)),
+            "synthesizer temperature serialized as {} (expected native {})",
             serialized,
-            legacy_temperature
+            native_temperature
         );
 
         let selector = SelectorDetails {
@@ -1912,14 +1917,13 @@ mod tests {
         };
         let serialized = serde_json::to_string(&selector).unwrap();
         assert!(
-            serialized.contains(&format!("\"temperature\":{}", legacy_temperature)),
-            "selector temperature serialized as {} (expected legacy {})",
+            serialized.contains(&format!("\"temperature\":{}", native_temperature)),
+            "selector temperature serialized as {} (expected native {})",
             serialized,
-            legacy_temperature
+            native_temperature
         );
 
-        let legacy_worker_temperature =
-            serde_json::json!({ "temperature": 0.3f32 })["temperature"].to_string();
+        let native_worker_temperature = serde_json::to_string(&0.3f32).unwrap();
         let worker = WorkerDetails {
             name: "w".to_string(),
             temperature: Some(0.3),
@@ -1930,10 +1934,10 @@ mod tests {
         };
         let serialized = serde_json::to_string(&worker).unwrap();
         assert!(
-            serialized.contains(&format!("\"temperature\":{}", legacy_worker_temperature)),
-            "worker temperature serialized as {} (expected legacy {})",
+            serialized.contains(&format!("\"temperature\":{}", native_worker_temperature)),
+            "worker temperature serialized as {} (expected native {})",
             serialized,
-            legacy_worker_temperature
+            native_worker_temperature
         );
     }
 

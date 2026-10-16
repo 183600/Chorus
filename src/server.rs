@@ -1,5 +1,8 @@
 use crate::config::Config;
-use crate::workflow::{StreamCallback, WorkflowEngine, WorkflowExecutionDetails};
+use crate::workflow::{
+    serialize_borrowed_workflow_widened, serialize_workflow_widened, StreamCallback, WorkflowEngine,
+    WorkflowExecutionDetails,
+};
 use anyhow::Result;
 use axum::{
     extract::{Request, State},
@@ -365,6 +368,7 @@ struct OpenAiChatCompletionResponse<'a> {
     id: &'a str,
     model: &'a str,
     object: &'static str,
+    #[serde(serialize_with = "serialize_workflow_widened")]
     workflow: Option<WorkflowExecutionDetails>,
 }
 
@@ -383,6 +387,7 @@ struct OpenAiCompletionResponse<'a> {
     id: &'a str,
     model: &'a str,
     object: &'static str,
+    #[serde(serialize_with = "serialize_workflow_widened")]
     workflow: Option<WorkflowExecutionDetails>,
 }
 
@@ -411,6 +416,7 @@ struct ResponsesResponse<'a> {
     status: &'static str,
     output: [ResponsesOutputMessage<'a>; 1],
     output_text: &'a str,
+    #[serde(serialize_with = "serialize_workflow_widened")]
     workflow: Option<WorkflowExecutionDetails>,
 }
 
@@ -425,7 +431,10 @@ struct GenerateCompletionChunk<'a> {
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     response: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_borrowed_workflow_widened"
+    )]
     workflow: Option<&'a WorkflowExecutionDetails>,
 }
 
@@ -438,7 +447,10 @@ struct ChatCompletionChunk<'a> {
     error: Option<&'a str>,
     message: ChatStreamMessage<'a>,
     model: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_borrowed_workflow_widened"
+    )]
     workflow: Option<&'a WorkflowExecutionDetails>,
 }
 
@@ -483,7 +495,10 @@ struct OpenAiFinalChatChunk<'a> {
     id: &'a str,
     model: &'a str,
     object: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_borrowed_workflow_widened"
+    )]
     workflow: Option<&'a WorkflowExecutionDetails>,
 }
 
@@ -497,7 +512,10 @@ struct OpenAiFinalCompletionChunk<'a> {
     id: &'a str,
     model: &'a str,
     object: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_borrowed_workflow_widened"
+    )]
     workflow: Option<&'a WorkflowExecutionDetails>,
 }
 
@@ -530,7 +548,10 @@ struct ResponsesCompletedChunk<'a> {
     output: [ResponsesOutputMessage<'a>; 1],
     output_text: &'a str,
     status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_borrowed_workflow_widened"
+    )]
     workflow: Option<&'a WorkflowExecutionDetails>,
 }
 
@@ -2200,7 +2221,7 @@ mod stream_payload_tests {
         let details = WorkflowExecutionDetails {
             analyzer: crate::workflow::AnalyzerDetails {
                 model: "m".to_string(),
-                temperature: 1.0,
+                temperature: 1.4,
                 auto_temperature: false,
             },
             workers: Vec::new(),
@@ -2233,13 +2254,68 @@ mod stream_payload_tests {
                 "finish_reason": "stop"
             } ],
             "workflow": {
-                "analyzer": { "model": "m", "temperature": 1.0, "auto_temperature": false },
+                "analyzer": { "model": "m", "temperature": 1.4f32, "auto_temperature": false },
                 "workers": [],
             },
         });
+        let serialized = serde_json::to_value(&with_workflow).unwrap();
+        assert_eq!(serialized, serde_json::to_value(&legacy).unwrap());
+        let workflow_temperature = serialized
+            .get("workflow")
+            .and_then(|workflow| workflow.get("analyzer"))
+            .and_then(|analyzer| analyzer.get("temperature"))
+            .map(ToString::to_string)
+            .unwrap();
         assert_eq!(
-            serde_json::to_value(with_workflow).unwrap(),
-            serde_json::to_value(&legacy).unwrap()
+            workflow_temperature,
+            serde_json::json!({ "temperature": 1.4f32 })["temperature"].to_string(),
+            "typed /v1 responses must keep the widened f64 temperature form"
+        );
+    }
+
+    #[test]
+    fn ollama_compatible_responses_keep_native_temperature_precision() {
+        let details = WorkflowExecutionDetails {
+            analyzer: crate::workflow::AnalyzerDetails {
+                model: "m".to_string(),
+                temperature: 1.4,
+                auto_temperature: false,
+            },
+            workers: Vec::new(),
+            selector: None,
+            synthesizer: None,
+        };
+        let native_temperature = serde_json::to_string(&1.4f32).unwrap();
+
+        let generate = GenerateResponse {
+            model: "m".to_string(),
+            created_at: "t".to_string(),
+            response: "r".to_string(),
+            done: true,
+            workflow: Some(details.clone()),
+        };
+        let serialized = serde_json::to_string(&generate).unwrap();
+        assert!(
+            serialized.contains(&format!("\"temperature\":{}", native_temperature)),
+            "generate response must keep native f32 temperature precision: {}",
+            serialized
+        );
+
+        let chat = ChatResponse {
+            model: "m".to_string(),
+            created_at: "t".to_string(),
+            message: Message {
+                role: "assistant".to_string(),
+                content: "r".to_string(),
+            },
+            done: true,
+            workflow: Some(details),
+        };
+        let serialized = serde_json::to_string(&chat).unwrap();
+        assert!(
+            serialized.contains(&format!("\"temperature\":{}", native_temperature)),
+            "chat response must keep native f32 temperature precision: {}",
+            serialized
         );
     }
 
@@ -2248,7 +2324,7 @@ mod stream_payload_tests {
         let details = WorkflowExecutionDetails {
             analyzer: crate::workflow::AnalyzerDetails {
                 model: "m".to_string(),
-                temperature: 1.0,
+                temperature: 1.4,
                 auto_temperature: false,
             },
             workers: Vec::new(),
@@ -2274,6 +2350,12 @@ mod stream_payload_tests {
             workflow: Some(&details),
         };
         assert_eq!(serde_json::to_value(&generate).unwrap(), legacy);
+        assert!(
+            serde_json::to_string(&generate).unwrap().contains(
+                &serde_json::json!({ "temperature": 1.4f32 })["temperature"].to_string()
+            ),
+            "stream chunks must keep the widened f64 temperature form"
+        );
 
         let generate_error = GenerateCompletionChunk {
             created_at: "t",
