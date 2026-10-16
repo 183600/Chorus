@@ -399,6 +399,42 @@ async fn execute_workflow(
     }
 }
 
+type WorkflowTaskResult = Result<(String, Option<WorkflowExecutionDetails>), AppError>;
+
+/// Runs the workflow for a streaming response.
+///
+/// The workflow is cancelled as soon as the SSE response body is dropped
+/// (e.g. the client disconnected or hit stop) so in-flight upstream LLM calls
+/// stop consuming quota instead of running to completion unnoticed.
+fn spawn_streaming_workflow(
+    state: SharedState,
+    prompt: String,
+    include_workflow: bool,
+) -> (
+    mpsc::UnboundedReceiver<String>,
+    oneshot::Receiver<WorkflowTaskResult>,
+) {
+    let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
+    let (result_tx, result_rx) = oneshot::channel();
+    let disconnect = chunk_tx.clone();
+
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            result = execute_workflow(&state, prompt, include_workflow, Some(chunk_tx)) => result,
+            _ = disconnect.closed() => {
+                tracing::info!("Client disconnected; cancelling the in-flight workflow");
+                Err(AppError::new(
+                    StatusCode::from_u16(499).expect("499 is a valid status code"),
+                    anyhow::anyhow!("client disconnected before the workflow completed"),
+                ))
+            }
+        };
+        let _ = result_tx.send(result);
+    });
+
+    (chunk_rx, result_rx)
+}
+
 fn insert_workflow_field(
     payload: &mut serde_json::Value,
     details: &Option<WorkflowExecutionDetails>,
@@ -582,20 +618,8 @@ async fn generate(
 
     if stream_enabled {
         let created_at = chrono::Utc::now().to_rfc3339();
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let result = execute_workflow(
-                &state_clone,
-                prompt,
-                include_workflow_details,
-                Some(chunk_tx),
-            )
-            .await;
-            let _ = result_tx.send(result);
-        });
+        let (chunk_rx, result_rx) =
+            spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
@@ -691,20 +715,8 @@ async fn chat(
 
     if stream_enabled {
         let created_at = chrono::Utc::now().to_rfc3339();
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let result = execute_workflow(
-                &state_clone,
-                prompt,
-                include_workflow_details,
-                Some(chunk_tx),
-            )
-            .await;
-            let _ = result_tx.send(result);
-        });
+        let (chunk_rx, result_rx) =
+            spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
@@ -819,20 +831,8 @@ async fn openai_chat_completions(
         let now = chrono::Utc::now();
         let created = now.timestamp();
         let id = format!("chatcmpl_{}", now.timestamp_millis());
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let result = execute_workflow(
-                &state_clone,
-                prompt,
-                include_workflow_details,
-                Some(chunk_tx),
-            )
-            .await;
-            let _ = result_tx.send(result);
-        });
+        let (chunk_rx, result_rx) =
+            spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
         let initial_stream = futures::stream::once({
             let id = id.clone();
@@ -987,20 +987,8 @@ async fn openai_completions(
         let now = chrono::Utc::now();
         let created = now.timestamp();
         let id = format!("cmpl_{}", now.timestamp_millis());
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let result = execute_workflow(
-                &state_clone,
-                prompt,
-                include_workflow_details,
-                Some(chunk_tx),
-            )
-            .await;
-            let _ = result_tx.send(result);
-        });
+        let (chunk_rx, result_rx) =
+            spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
@@ -1316,20 +1304,8 @@ async fn responses(
         let created = now.timestamp();
         let resp_id = format!("resp_{}", now.timestamp_millis());
         let msg_id = format!("msg_{}", now.timestamp_millis());
-        let (chunk_tx, chunk_rx) = mpsc::unbounded_channel::<String>();
-        let (result_tx, result_rx) = oneshot::channel();
-
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let result = execute_workflow(
-                &state_clone,
-                prompt,
-                include_workflow_details,
-                Some(chunk_tx),
-            )
-            .await;
-            let _ = result_tx.send(result);
-        });
+        let (chunk_rx, result_rx) =
+            spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
         let initial_stream = futures::stream::once({
             let resp_id = resp_id.clone();
@@ -2323,5 +2299,222 @@ mod auth_tests {
         assert_eq!(bearer_token("Basic secret"), None);
         assert_eq!(bearer_token("Bearer"), None);
         assert_eq!(bearer_token("Bearer   "), None);
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    use crate::config::{
+        ModelConfig, ServerConfig, TimeoutConfig, WorkflowConfig, WorkflowModelTarget,
+        WorkflowPlan, WorkflowWorker,
+    };
+    use axum::response::Response as AxumResponse;
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use tokio::sync::mpsc as tokio_mpsc;
+
+    struct UpstreamDropSignal(Option<tokio_mpsc::UnboundedSender<()>>);
+
+    impl Drop for UpstreamDropSignal {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct UpstreamState {
+        dropped: tokio_mpsc::UnboundedSender<()>,
+        infinite: bool,
+    }
+
+    async fn upstream_handler(
+        State(state): State<UpstreamState>,
+        Json(body): Json<Value>,
+    ) -> AxumResponse {
+        let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+
+        if !streaming {
+            return Json(serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "worker answer" },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .into_response();
+        }
+
+        let infinite = state.infinite;
+        let frames = futures::stream::unfold(
+            (UpstreamDropSignal(Some(state.dropped)), 0u64),
+            move |(signal, tick)| async move {
+                if !infinite {
+                    if tick == 3 {
+                        return Some((
+                            Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n")),
+                            (signal, tick + 1),
+                        ));
+                    }
+                    if tick >= 4 {
+                        return None;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let payload = serde_json::json!({
+                    "choices": [{ "index": 0, "delta": { "content": "x" } }]
+                });
+                let frame = format!("data: {}\n\n", payload);
+                Some((Ok::<_, Infallible>(Bytes::from(frame)), (signal, tick + 1)))
+            },
+        );
+
+        let mut response = Response::new(axum::body::Body::from_stream(frames));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        response
+    }
+
+    async fn spawn_upstream(infinite: bool) -> (String, tokio_mpsc::UnboundedReceiver<()>) {
+        let (dropped_tx, dropped_rx) = tokio_mpsc::unbounded_channel();
+        let state = UpstreamState {
+            dropped: dropped_tx,
+            infinite,
+        };
+        let router = Router::new()
+            .route("/v1/chat/completions", post(upstream_handler))
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        (format!("http://{}", addr), dropped_rx)
+    }
+
+    fn test_config(api_base: &str) -> Config {
+        let target = |name: &str| WorkflowModelTarget {
+            model: name.to_string(),
+            temperature: None,
+            auto_temperature: None,
+        };
+
+        Config {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                api_key: None,
+            },
+            models: vec![ModelConfig {
+                name: "m1".to_string(),
+                api_base: api_base.to_string(),
+                api_key: "sk-test".to_string(),
+                temperature: Some(0.5),
+                auto_temperature: None,
+            }],
+            workflow_integration: WorkflowPlan {
+                analyzer: target("m1"),
+                workers: vec![WorkflowWorker::Model(target("m1"))],
+                synthesizer: Some(target("m1")),
+                selector: None,
+                nested_worker_depth: None,
+            },
+            workflow: WorkflowConfig {
+                timeouts: TimeoutConfig {
+                    analyzer_timeout_secs: 30,
+                    worker_timeout_secs: 30,
+                    synthesizer_timeout_secs: 30,
+                },
+                domains: HashMap::new(),
+                worker_concurrency: None,
+                retry: Default::default(),
+            },
+        }
+    }
+
+    async fn spawn_chorus(config: Config) -> String {
+        let config = Arc::new(config);
+        let state = Arc::new(AppState {
+            workflow_engine: WorkflowEngine::from_shared(Arc::clone(&config)),
+            config,
+            health_body: Bytes::from_static(b"{\"status\":\"ok\"}"),
+        });
+        let router = build_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        format!("http://{}", addr)
+    }
+
+    fn chat_request(chorus: &str) -> reqwest::RequestBuilder {
+        reqwest::Client::new()
+            .post(format!("{}/api/chat", chorus))
+            .json(&serde_json::json!({
+                "model": "chorus",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "stream": true
+            }))
+    }
+
+    #[tokio::test]
+    async fn disconnecting_the_sse_client_cancels_upstream_work() {
+        let (upstream, mut dropped) = spawn_upstream(true).await;
+        let chorus = spawn_chorus(test_config(&format!("{}/v1", upstream))).await;
+
+        let response = chat_request(&chorus).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+
+        let mut stream = response.bytes_stream();
+        for _ in 0..3 {
+            tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("Chorus should stream tokens")
+                .expect("Chorus stream should stay open")
+                .expect("stream chunk should be readable");
+        }
+
+        drop(stream);
+
+        tokio::time::timeout(Duration::from_secs(5), dropped.recv())
+            .await
+            .expect("upstream request should be cancelled after the client disconnects")
+            .expect("upstream drop signal channel closed unexpectedly");
+    }
+
+    #[tokio::test]
+    async fn fully_consumed_streams_still_complete() {
+        let (upstream, _dropped) = spawn_upstream(false).await;
+        let chorus = spawn_chorus(test_config(&format!("{}/v1", upstream))).await;
+
+        let response = chat_request(&chorus).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+
+        let body = tokio::time::timeout(Duration::from_secs(5), response.text())
+            .await
+            .expect("stream should finish")
+            .unwrap();
+
+        assert!(
+            body.contains("\"done\":true"),
+            "final event missing done flag: {}",
+            body
+        );
+        assert!(
+            body.contains("\"content\":\"x\""),
+            "streamed tokens missing from response: {}",
+            body
+        );
+        assert!(!body.contains("\"error\""), "unexpected error: {}", body);
     }
 }
