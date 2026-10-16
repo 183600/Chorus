@@ -138,9 +138,7 @@ fn chunk_text(content: &str, max_len: usize) -> Vec<String> {
 struct ChunkEvents<F> {
     content: String,
     max_len: usize,
-    start: usize,
     pos: usize,
-    current_len: usize,
     finished: bool,
     make_event: F,
 }
@@ -153,9 +151,7 @@ where
         Self {
             content,
             max_len,
-            start: 0,
             pos: 0,
-            current_len: 0,
             finished: false,
             make_event,
         }
@@ -178,42 +174,36 @@ where
             self.finished = true;
             return Some((self.make_event)(""));
         }
-
-        while self.pos < content_len {
-            let ch = self.content[self.pos..]
-                .chars()
-                .next()
-                .expect("chunk scanning stays on char boundaries");
-            let ch_len = ch.len_utf8();
-            self.current_len += ch_len;
-            let end = self.pos + ch_len;
-            self.pos = end;
-
-            if ch == '\n' || self.current_len >= self.max_len {
-                let start = self.start;
-                self.start = end;
-                self.current_len = 0;
-                let Self {
-                    content,
-                    make_event,
-                    ..
-                } = self;
-                return Some(make_event(&content[start..end]));
-            }
+        if self.pos >= content_len {
+            self.finished = true;
+            return None;
         }
 
-        self.finished = true;
-        if self.start < content_len {
-            let start = self.start;
-            self.start = content_len;
-            let Self {
-                content,
-                make_event,
-                ..
-            } = self;
-            return Some(make_event(&content[start..]));
+        let start = self.pos;
+        let limit = start
+            .saturating_add(self.max_len.max(1))
+            .min(content_len);
+        let mut end = limit;
+        while end < content_len && !self.content.is_char_boundary(end) {
+            end += 1;
         }
-        None
+
+        let end = match self.content[start..end].find('\n') {
+            Some(offset) => start + offset + 1,
+            None => end,
+        };
+
+        self.pos = end;
+        if end >= content_len {
+            self.finished = true;
+        }
+
+        let Self {
+            content,
+            make_event,
+            ..
+        } = self;
+        Some(make_event(&content[start..end]))
     }
 }
 
@@ -1531,47 +1521,69 @@ async fn responses(
     .into_response())
 }
 
-async fn list_models_openai(State(state): State<SharedState>) -> impl IntoResponse {
-    let created = chrono::Utc::now().timestamp();
-    let data: Vec<_> = state
-        .config
-        .models
-        .iter()
-        .map(|m| {
-            serde_json::json!({
-                "id": m.name,
-                "object": "model",
-                "created": created,
-                "owned_by": "chorus",
-                "permission": Vec::<serde_json::Value>::new(),
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "object": "list",
-        "data": data
-    }))
+#[derive(Serialize)]
+struct OpenAiModelEntry<'a> {
+    created: i64,
+    id: &'a str,
+    object: &'static str,
+    owned_by: &'static str,
+    permission: [Value; 0],
 }
 
-async fn list_models(State(state): State<SharedState>) -> impl IntoResponse {
-    let modified_at = chrono::Utc::now().to_rfc3339();
-    let models: Vec<_> = state
+#[derive(Serialize)]
+struct OpenAiModelList<'a> {
+    data: Vec<OpenAiModelEntry<'a>>,
+    object: &'static str,
+}
+
+#[derive(Serialize)]
+struct ModelEntry<'a> {
+    model: &'a str,
+    modified_at: &'a str,
+    name: &'a str,
+}
+
+#[derive(Serialize)]
+struct ModelList<'a> {
+    models: Vec<ModelEntry<'a>>,
+}
+
+async fn list_models_openai(State(state): State<SharedState>) -> Response {
+    let created = chrono::Utc::now().timestamp();
+    let data = state
         .config
         .models
         .iter()
-        .map(|m| {
-            serde_json::json!({
-                "name": m.name,
-                "model": m.name,
-                "modified_at": modified_at,
-            })
+        .map(|m| OpenAiModelEntry {
+            created,
+            id: &m.name,
+            object: "model",
+            owned_by: "chorus",
+            permission: [],
         })
         .collect();
 
-    Json(serde_json::json!({
-        "models": models
-    }))
+    Json(OpenAiModelList {
+        data,
+        object: "list",
+    })
+    .into_response()
+}
+
+async fn list_models(State(state): State<SharedState>) -> Response {
+    let modified_at = chrono::Utc::now().to_rfc3339();
+    let models = state
+        .config
+        .models
+        .iter()
+        .map(|m| ModelEntry {
+            model: &m.name,
+            modified_at: &modified_at,
+            name: &m.name,
+        })
+        .collect();
+
+    Json(ModelList { models }).into_response()
 }
 
 #[cfg(test)]

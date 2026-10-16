@@ -618,7 +618,39 @@ impl LLMClient {
 #[derive(Deserialize)]
 struct FastStreamChunk<'a> {
     #[serde(default, borrow)]
-    choices: Option<Vec<FastStreamChoice<'a>>>,
+    choices: Option<FirstStreamChoice<'a>>,
+}
+
+struct FirstStreamChoice<'a>(FastStreamChoice<'a>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for FirstStreamChoice<'a> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct FirstChoiceVisitor<'a>(std::marker::PhantomData<&'a ()>);
+
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for FirstChoiceVisitor<'a> {
+            type Value = FirstStreamChoice<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a sequence of stream choices")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let first = seq.next_element::<FastStreamChoice<'a>>()?;
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                first
+                    .map(FirstStreamChoice)
+                    .ok_or_else(|| serde::de::Error::custom("empty choices sequence"))
+            }
+        }
+
+        deserializer.deserialize_seq(FirstChoiceVisitor(std::marker::PhantomData))
+    }
 }
 
 #[derive(Deserialize)]
@@ -661,7 +693,7 @@ fn fast_stream_event(payload: &str) -> FastStreamEvent<'_> {
         Err(_) => return FastStreamEvent::Unsupported,
     };
 
-    let Some(choice) = parsed.choices.as_ref().and_then(|choices| choices.first()) else {
+    let Some(choice) = parsed.choices.as_ref().map(|choices| &choices.0) else {
         return FastStreamEvent::Unsupported;
     };
 
@@ -770,15 +802,21 @@ fn single_data_payload(event: &str) -> Option<&str> {
 }
 
 fn find_event_separator(buffer: &str) -> Option<(usize, usize)> {
-    let lf = buffer.find("\n\n").map(|idx| (idx, 2));
-    let crlf = buffer.find("\r\n\r\n").map(|idx| (idx, 4));
+    let bytes = buffer.as_bytes();
 
-    match (lf, crlf) {
-        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
-        (Some(lf), None) => Some(lf),
-        (None, Some(crlf)) => Some(crlf),
-        (None, None) => None,
+    for index in 0..bytes.len() {
+        match bytes[index] {
+            b'\r' if index + 4 <= bytes.len() && &bytes[index + 1..index + 4] == b"\n\r\n" => {
+                return Some((index, 4));
+            }
+            b'\n' if index + 1 < bytes.len() && bytes[index + 1] == b'\n' => {
+                return Some((index, 2));
+            }
+            _ => {}
+        }
     }
+
+    None
 }
 
 fn extract_completion_text(value: &serde_json::Value) -> Option<String> {
