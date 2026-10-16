@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::de::Error as DeError;
 use serde::{de::Deserializer, Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -222,6 +222,32 @@ impl WorkflowPlan {
 
     pub fn worker_labels(&self) -> Vec<String> {
         self.workers.iter().map(WorkflowWorker::label).collect()
+    }
+
+    pub fn referenced_models(&self) -> HashSet<String> {
+        let mut refs = HashSet::new();
+        self.collect_model_references(&mut refs);
+        refs
+    }
+
+    fn collect_model_references(&self, refs: &mut HashSet<String>) {
+        refs.insert(self.analyzer.model.clone());
+        if let Some(synthesizer) = &self.synthesizer {
+            refs.insert(synthesizer.model.clone());
+        }
+        if let Some(selector) = &self.selector {
+            refs.insert(selector.model.clone());
+        }
+        for worker in &self.workers {
+            match worker {
+                WorkflowWorker::Model(target) => {
+                    refs.insert(target.model.clone());
+                }
+                WorkflowWorker::Workflow(plan) => {
+                    plan.collect_model_references(refs);
+                }
+            }
+        }
     }
 
     pub fn to_json_string(&self) -> Result<String> {
@@ -750,6 +776,8 @@ impl Config {
             .with_context(|| format!("Failed to parse TOML from {}", path))?;
         cfg.server.api_key =
             resolve_api_key(cfg.server.api_key.take(), env::var(API_KEY_ENV_VAR).ok());
+        cfg.validate_model_references()
+            .with_context(|| "Workflow configuration references undefined models")?;
         Ok(cfg)
     }
 
@@ -982,6 +1010,28 @@ impl Config {
     pub fn load_from_user_config() -> Result<Self> {
         let path = Self::ensure_user_config_exists()?;
         Self::load(&path.to_string_lossy())
+    }
+
+    pub fn validate_model_references(&self) -> Result<()> {
+        let defined: HashSet<&str> = self.models.iter().map(|m| m.name.as_str()).collect();
+        let mut missing: Vec<String> = self
+            .workflow_integration
+            .referenced_models()
+            .into_iter()
+            .filter(|name| !defined.contains(name.as_str()))
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        missing.sort();
+        missing.dedup();
+
+        Err(anyhow!(
+            "Workflow configuration references undefined model(s): {}. Please add matching [[model]] entries for each missing name.",
+            missing.join(", ")
+        ))
     }
 
     pub fn effective_timeouts_for_domain(&self, domain: Option<&str>) -> TimeoutConfig {

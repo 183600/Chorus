@@ -217,6 +217,37 @@ worker_timeout_secs = 20
 synthesizer_timeout_secs = 30
 "#;
 
+    const CFG_MISSING_MODEL: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 11435
+
+[[model]]
+api_base = "https://apis.iflow.cn/v1"
+api_key = "k"
+name = "glm-4.6"
+
+[workflow-integration]
+json = """{
+  "analyzer": {
+    "ref": "glm-4.6"
+  },
+  "workers": [
+    {
+      "name": "deepseek-v3.2"
+    }
+  ],
+  "synthesizer": {
+    "ref": "glm-4.6"
+  }
+}"""
+
+[workflow.timeouts]
+analyzer_timeout_secs = 30
+worker_timeout_secs = 60
+synthesizer_timeout_secs = 90
+"#;
+
     #[test]
     fn nested_workflow_config_parses() {
         let cfg: Config = toml::from_str(CFG_NESTED).unwrap();
@@ -1864,6 +1895,55 @@ synthesizer_timeout_secs = 90
 
         let cfg = Config::load(&config_path.to_string_lossy()).unwrap();
         assert!(cfg.server.api_key.is_some());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn validate_model_references_flags_missing_models() {
+        let cfg: Config = toml::from_str(CFG_MISSING_MODEL).unwrap();
+        let err = cfg
+            .validate_model_references()
+            .expect_err("expected missing model validation error");
+        let message = err.to_string();
+        assert!(
+            message.contains("deepseek-v3.2"),
+            "error message should mention missing model, got {}",
+            message
+        );
+    }
+
+    #[test]
+    fn validate_model_references_passes_when_all_models_defined() {
+        let cfg: Config = toml::from_str(CFG_NESTED).unwrap();
+        cfg.validate_model_references()
+            .expect("nested config defines all referenced models");
+    }
+
+    #[test]
+    fn load_rejects_config_with_undefined_model_references() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "chorus_undefined_model_load_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("config.toml");
+        fs::write(&config_path, CFG_MISSING_MODEL).unwrap();
+
+        let err = Config::load(&config_path.to_string_lossy())
+            .expect_err("expected load to fail for undefined model reference");
+        let message = format!("{:#}", err);
+        assert!(
+            message.contains("deepseek-v3.2"),
+            "error chain should mention the missing model, got {}",
+            message
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
