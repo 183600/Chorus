@@ -626,7 +626,7 @@ pub async fn start_server(config: Arc<Config>) -> Result<()> {
 
     tracing::info!("Chorus server listening on http://{}", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app).tcp_nodelay(true).await?;
 
     Ok(())
 }
@@ -723,14 +723,17 @@ fn constant_time_eq(provided: &[u8], expected: &[u8]) -> bool {
     diff == 0
 }
 
+const UNAUTHORIZED_BODY: &str = r#"{"error":"Unauthorized: supply the configured API key via `Authorization: Bearer <key>` or the `x-api-key` header."}"#;
+
 fn unauthorized_response() -> Response {
-    let mut response = (
-        StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({
-            "error": "Unauthorized: supply the configured API key via `Authorization: Bearer <key>` or the `x-api-key` header."
-        })),
-    )
-        .into_response();
+    let mut response = Response::new(axum::body::Body::from(Bytes::from_static(
+        UNAUTHORIZED_BODY.as_bytes(),
+    )));
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     response.headers_mut().insert(
         header::WWW_AUTHENTICATE,
         HeaderValue::from_static("Bearer"),
@@ -769,14 +772,16 @@ async fn generate(
     let include_workflow_details = include_workflow.unwrap_or(false);
 
     if stream_enabled {
-        let created_at = chrono::Utc::now().to_rfc3339();
         let (chunk_rx, result_rx) =
             spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
+        let created_at: Arc<str> = Arc::from(chrono::Utc::now().to_rfc3339());
+        let model_name: Arc<str> = Arc::from(model_name);
+
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let model_name: Arc<str> = Arc::from(model_name.as_str());
-                let created_at: Arc<str> = Arc::from(created_at.as_str());
+                let model_name = Arc::clone(&model_name);
+                let created_at = Arc::clone(&created_at);
                 move |segment| {
                     let model_name = Arc::clone(&model_name);
                     let created_at = Arc::clone(&created_at);
@@ -794,8 +799,8 @@ async fn generate(
             });
 
         let completion_stream = futures::stream::once({
-            let model_name = model_name.clone();
-            let created_at = created_at.clone();
+            let model_name = Arc::clone(&model_name);
+            let created_at = Arc::clone(&created_at);
             async move {
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
@@ -871,14 +876,16 @@ async fn chat(
     let include_workflow_details = req.include_workflow.unwrap_or(false);
 
     if stream_enabled {
-        let created_at = chrono::Utc::now().to_rfc3339();
         let (chunk_rx, result_rx) =
             spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
+        let created_at: Arc<str> = Arc::from(chrono::Utc::now().to_rfc3339());
+        let model_name: Arc<str> = Arc::from(model_name);
+
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let model_name: Arc<str> = Arc::from(model_name.as_str());
-                let created_at: Arc<str> = Arc::from(created_at.as_str());
+                let model_name = Arc::clone(&model_name);
+                let created_at = Arc::clone(&created_at);
                 move |segment| {
                     let model_name = Arc::clone(&model_name);
                     let created_at = Arc::clone(&created_at);
@@ -899,8 +906,8 @@ async fn chat(
             });
 
         let completion_stream = futures::stream::once({
-            let model_name = model_name.clone();
-            let created_at = created_at.clone();
+            let model_name = Arc::clone(&model_name);
+            let created_at = Arc::clone(&created_at);
             async move {
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
@@ -990,13 +997,15 @@ async fn openai_chat_completions(
     if stream_enabled {
         let now = chrono::Utc::now();
         let created = now.timestamp();
-        let id = format!("chatcmpl_{}", now.timestamp_millis());
         let (chunk_rx, result_rx) =
             spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
+        let id: Arc<str> = Arc::from(format!("chatcmpl_{}", now.timestamp_millis()));
+        let model_name: Arc<str> = Arc::from(model_name);
+
         let initial_stream = futures::stream::once({
-            let id = id.clone();
-            let model_name = model_name.clone();
+            let id = Arc::clone(&id);
+            let model_name = Arc::clone(&model_name);
             async move {
                 let payload = OpenAiInitialChatChunk {
                     choices: [OpenAiInitialChatChoice {
@@ -1015,8 +1024,8 @@ async fn openai_chat_completions(
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let id: Arc<str> = Arc::from(id.as_str());
-                let model_name: Arc<str> = Arc::from(model_name.as_str());
+                let id = Arc::clone(&id);
+                let model_name = Arc::clone(&model_name);
                 move |segment| {
                     let id = Arc::clone(&id);
                     let model_name = Arc::clone(&model_name);
@@ -1039,8 +1048,8 @@ async fn openai_chat_completions(
             });
 
         let completion_stream = futures::stream::once({
-            let id = id.clone();
-            let model_name = model_name.clone();
+            let id = Arc::clone(&id);
+            let model_name = Arc::clone(&model_name);
             async move {
                 let choices = |finish_reason: &'static str| {
                     [OpenAiFinalChatChoice {
@@ -1144,14 +1153,16 @@ async fn openai_completions(
     if stream_enabled {
         let now = chrono::Utc::now();
         let created = now.timestamp();
-        let id = format!("cmpl_{}", now.timestamp_millis());
         let (chunk_rx, result_rx) =
             spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
+        let id: Arc<str> = Arc::from(format!("cmpl_{}", now.timestamp_millis()));
+        let model_name: Arc<str> = Arc::from(model_name);
+
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let id: Arc<str> = Arc::from(id.as_str());
-                let model_name: Arc<str> = Arc::from(model_name.as_str());
+                let id = Arc::clone(&id);
+                let model_name = Arc::clone(&model_name);
                 move |segment| {
                     let id = Arc::clone(&id);
                     let model_name = Arc::clone(&model_name);
@@ -1175,8 +1186,8 @@ async fn openai_completions(
             });
 
         let completion_stream = futures::stream::once({
-            let id = id.clone();
-            let model_name = model_name.clone();
+            let id = Arc::clone(&id);
+            let model_name = Arc::clone(&model_name);
             async move {
                 let choices = |finish_reason: &'static str| {
                     [OpenAiCompletionChoice {
@@ -1363,12 +1374,32 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
         }
     }
 
+    fn push_labeled_segment(segments: &mut Option<String>, label: &str, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match segments.as_mut() {
+            Some(joined) => {
+                joined.reserve(1 + label.len() + text.len());
+                joined.push('\n');
+                joined.push_str(label);
+                joined.push_str(text);
+            }
+            None => {
+                let mut joined = String::with_capacity(label.len() + text.len());
+                joined.push_str(label);
+                joined.push_str(text);
+                *segments = Some(joined);
+            }
+        }
+    }
+
     let mut segments: Option<String> = None;
 
     if let Some(Value::String(instr)) = payload.get("instructions") {
         let trimmed = instr.trim();
         if !trimmed.is_empty() {
-            push_segment(&mut segments, &format!("system: {}", trimmed));
+            push_labeled_segment(&mut segments, "system: ", trimmed);
         }
     }
 
@@ -1456,16 +1487,17 @@ async fn responses(
     if stream_requested {
         let now = chrono::Utc::now();
         let created = now.timestamp();
-        let resp_id = format!("resp_{}", now.timestamp_millis());
-        let msg_id = format!("msg_{}", now.timestamp_millis());
         let (chunk_rx, result_rx) =
             spawn_streaming_workflow(state.clone(), prompt, include_workflow_details);
 
+        let resp_id: Arc<str> = Arc::from(format!("resp_{}", now.timestamp_millis()));
+        let msg_id: Arc<str> = Arc::from(format!("msg_{}", now.timestamp_millis()));
+        let model_name: Arc<str> = Arc::from(model_name);
+
         let initial_stream = futures::stream::once({
-            let resp_id = resp_id.clone();
-            let msg_id = msg_id.clone();
-            let model_name = model_name.clone();
-            let created = created;
+            let resp_id = Arc::clone(&resp_id);
+            let msg_id = Arc::clone(&msg_id);
+            let model_name = Arc::clone(&model_name);
             async move {
                 let payload = ResponsesInitialChunk {
                     created,
@@ -1494,8 +1526,8 @@ async fn responses(
 
         let chunk_stream =
             UnboundedReceiverStream::new(chunk_rx).flat_map({
-                let resp_id: Arc<str> = Arc::from(resp_id.as_str());
-                let model_name: Arc<str> = Arc::from(model_name.as_str());
+                let resp_id = Arc::clone(&resp_id);
+                let model_name = Arc::clone(&model_name);
                 let content_index = Arc::clone(&content_index);
                 move |segment| {
                     let resp_id = Arc::clone(&resp_id);
@@ -1523,9 +1555,9 @@ async fn responses(
             });
 
         let completion_stream = futures::stream::once({
-            let resp_id = resp_id.clone();
-            let msg_id = msg_id.clone();
-            let model_name = model_name.clone();
+            let resp_id = Arc::clone(&resp_id);
+            let msg_id = Arc::clone(&msg_id);
+            let model_name = Arc::clone(&model_name);
             let prompt_len = prompt_len;
             let created = created;
             async move {
