@@ -414,9 +414,8 @@ struct ResponsesResponse<'a> {
     workflow: Option<WorkflowExecutionDetails>,
 }
 
-/// Terminal payload for `/api/generate` and `/v1/generate` streams. Fields are
-/// declared in the same order serde_json previously emitted them for the
-/// `json!` macro so the wire format is byte-for-byte identical.
+/// Terminal payload for `/api/generate` and `/v1/generate` streams. Field
+/// order is part of the wire format.
 #[derive(Serialize)]
 struct GenerateCompletionChunk<'a> {
     created_at: &'a str,

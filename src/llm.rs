@@ -416,9 +416,8 @@ impl LLMClient {
                 }
             };
 
-            // Fast path: the common OpenAI-compatible shape is parsed with a
-            // borrowed view so no `Value` tree is built. Any other shape is
-            // deferred to the tolerant `Value`-based path below.
+            // The common OpenAI-compatible shape; any other shape is deferred
+            // to the tolerant `Value`-based path below.
             if let Ok(text) = std::str::from_utf8(&body) {
                 if let Some(content) = fast_completion_text(text) {
                     if let Some(sender) = stream.as_ref() {
@@ -435,8 +434,8 @@ impl LLMClient {
             let v: serde_json::Value = match serde_json::from_slice(&body) {
                 Ok(value) => value,
                 Err(err) => {
-                    // Mirrors the message reqwest's `Response::json` produced
-                    // before the body was read through `bytes()`.
+                    // Matches the error message reqwest's `Response::json`
+                    // produces for invalid JSON bodies.
                     return Err(anyhow!("error decoding response body: {}", err).into());
                 }
             };
@@ -652,7 +651,7 @@ struct FastStreamChunk<'a> {
 }
 
 /// Deserializes only the first element of a choices sequence, skipping the
-/// remaining ones without allocating.
+/// remaining ones.
 struct FirstChoice<T>(T);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for FirstChoice<T> {
@@ -753,8 +752,7 @@ fn fast_stream_event(payload: &str) -> FastStreamEvent<'_> {
 
 /// Common non-streaming OpenAI-compatible completion shape.
 ///
-/// Only used to skip building a `serde_json::Value` tree for the common case;
-/// every shape that is not recognized falls back to the tolerant
+/// Every shape that is not recognized falls back to the tolerant
 /// `extract_completion_text` path, so this must only ever return a value that
 /// the generic path would also return.
 #[derive(Deserialize)]
