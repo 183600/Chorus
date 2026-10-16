@@ -404,8 +404,7 @@ type WorkflowTaskResult = Result<(String, Option<WorkflowExecutionDetails>), App
 /// Runs the workflow for a streaming response.
 ///
 /// The workflow is cancelled as soon as the SSE response body is dropped
-/// (e.g. the client disconnected or hit stop) so in-flight upstream LLM calls
-/// stop consuming quota instead of running to completion unnoticed.
+/// (e.g. the client disconnected or hit stop).
 fn spawn_streaming_workflow(
     state: SharedState,
     prompt: String,
