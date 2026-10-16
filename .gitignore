@@ -14,7 +14,3 @@ Cargo.lock
 .codex/
 **/auth.json
 **/config.toml
-# continuous-loop artifacts (must never be committed)
-.opencode/
-opencode.json
-results/
