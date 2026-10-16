@@ -6,7 +6,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{
-        sse::{Event, Sse},
+        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
     routing::{get, post},
@@ -14,6 +14,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::{stream, StreamExt};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -212,6 +213,41 @@ where
     F: FnMut(&str) -> Result<Event, Infallible>,
 {
     ChunkEvents::new(segment, STREAM_CHUNK_SIZE, make_event)
+}
+
+/// Keep-alive cadence for streaming responses.
+///
+/// A workflow may stay silent for tens of seconds while the analyzer, workers
+/// and selector run before the synthesizer yields its first token. Without
+/// traffic, intermediaries (reverse proxies, load balancers) and client read
+/// timeouts may drop the connection mid-request, so a comment frame is emitted
+/// periodically until the first real event arrives.
+const SSE_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Wraps a stream of SSE events with keep-alive comments and adds headers that
+/// keep reverse proxies from buffering the response, so tokens reach the client
+/// as they are produced (e.g. `X-Accel-Buffering: no` for nginx).
+fn sse_response<S, E>(stream: S) -> Response
+where
+    S: futures::Stream<Item = Result<Event, E>> + Send + 'static,
+    E: Into<axum::BoxError>,
+{
+    sse_response_with_interval(stream, SSE_KEEP_ALIVE_INTERVAL)
+}
+
+fn sse_response_with_interval<S, E>(stream: S, interval: Duration) -> Response
+where
+    S: futures::Stream<Item = Result<Event, E>> + Send + 'static,
+    E: Into<axum::BoxError>,
+{
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(interval))
+        .into_response();
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
 
 fn build_prompt_from_messages(messages: &[Message]) -> String {
@@ -802,7 +838,7 @@ async fn generate(
         });
 
         let sse_stream = chunk_stream.chain(completion_stream);
-        return Ok(Sse::new(sse_stream).into_response());
+        return Ok(sse_response(sse_stream));
     }
 
     let (response_text, workflow_details) =
@@ -916,7 +952,7 @@ async fn chat(
         });
 
         let sse_stream = chunk_stream.chain(completion_stream);
-        return Ok(Sse::new(sse_stream).into_response());
+        return Ok(sse_response(sse_stream));
     }
 
     let (response_text, workflow_details) =
@@ -1065,7 +1101,7 @@ async fn openai_chat_completions(
             .chain(completion_stream)
             .chain(done_stream);
 
-        return Ok(Sse::new(sse_stream).into_response());
+        return Ok(sse_response(sse_stream));
     }
 
     let (response_text, workflow_details) =
@@ -1198,7 +1234,7 @@ async fn openai_completions(
         });
 
         let sse_stream = chunk_stream.chain(completion_stream).chain(done_stream);
-        return Ok(Sse::new(sse_stream).into_response());
+        return Ok(sse_response(sse_stream));
     }
 
     let (response_text, workflow_details) =
@@ -1581,7 +1617,7 @@ async fn responses(
             .chain(completion_stream)
             .chain(done_stream);
 
-        return Ok(Sse::new(sse_stream).into_response());
+        return Ok(sse_response(sse_stream));
     }
 
     let (response_text, workflow_details) =
@@ -2425,6 +2461,67 @@ mod stream_payload_tests {
             "error": "boom",
         });
         assert_eq!(serde_json::to_value(&responses_error).unwrap(), legacy);
+    }
+}
+
+#[cfg(test)]
+mod sse_response_tests {
+    use super::*;
+
+    fn pending_stream() -> impl futures::Stream<Item = Result<Event, Infallible>> {
+        futures::stream::pending()
+    }
+
+    async fn next_data_chunk(
+        body: &mut axum::body::BodyDataStream,
+    ) -> Result<Bytes, axum::Error> {
+        tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("timed out waiting for an SSE chunk")
+            .expect("SSE body stream ended unexpectedly")
+    }
+
+    #[tokio::test]
+    async fn streaming_responses_are_flagged_for_reverse_proxies() {
+        let response = sse_response(pending_stream());
+        let headers = response.headers();
+
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-cache");
+        assert_eq!(headers.get("x-accel-buffering").unwrap(), "no");
+    }
+
+    #[tokio::test]
+    async fn idle_streams_emit_keep_alive_comments() {
+        let response = sse_response_with_interval(pending_stream(), Duration::from_millis(20));
+        let mut body = response.into_body().into_data_stream();
+
+        let chunk = next_data_chunk(&mut body).await.unwrap();
+        assert_eq!(&chunk[..], b":\n\n");
+    }
+
+    #[tokio::test]
+    async fn events_are_forwarded_untouched() {
+        let stream = futures::stream::iter(vec![
+            Ok::<_, Infallible>(Event::default().data("hello")),
+            Ok::<_, Infallible>(Event::default().event("tick").data("world")),
+        ]);
+        let response = sse_response_with_interval(stream, Duration::from_secs(30));
+        let mut body = response.into_body().into_data_stream();
+
+        let chunk = next_data_chunk(&mut body).await.unwrap();
+        assert_eq!(&chunk[..], b"data: hello\n\n");
+
+        let chunk = next_data_chunk(&mut body).await.unwrap();
+        assert_eq!(&chunk[..], b"event: tick\ndata: world\n\n");
+
+        let end = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("stream should finish without extra events");
+        assert!(end.is_none());
     }
 }
 
