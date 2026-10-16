@@ -1395,6 +1395,19 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
         }
     }
 
+    fn push_owned_segment(segments: &mut Option<String>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        match segments.as_mut() {
+            Some(joined) => {
+                joined.push('\n');
+                joined.push_str(&text);
+            }
+            None => *segments = Some(text),
+        }
+    }
+
     fn push_labeled_segment(segments: &mut Option<String>, label: &str, text: &str) {
         if text.is_empty() {
             return;
@@ -1427,9 +1440,9 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
     if let Some(Value::Array(messages)) = payload.get("messages") {
         for msg in messages {
             if let Some(text) = extract_message_text(msg) {
-                push_segment(&mut segments, &text);
+                push_owned_segment(&mut segments, text);
             } else if let Some(text) = extract_text_value(msg) {
-                push_segment(&mut segments, &text);
+                push_owned_segment(&mut segments, text);
             }
         }
     }
@@ -1442,17 +1455,17 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
             Value::Array(items) => {
                 for item in items {
                     if let Some(text) = extract_message_text(item) {
-                        push_segment(&mut segments, &text);
+                        push_owned_segment(&mut segments, text);
                     } else if let Some(text) = extract_text_value(item) {
-                        push_segment(&mut segments, &text);
+                        push_owned_segment(&mut segments, text);
                     }
                 }
             }
             Value::Object(_) => {
                 if let Some(text) = extract_message_text(input) {
-                    push_segment(&mut segments, &text);
+                    push_owned_segment(&mut segments, text);
                 } else if let Some(text) = extract_text_value(input) {
-                    push_segment(&mut segments, &text);
+                    push_owned_segment(&mut segments, text);
                 }
             }
             _ => {}
@@ -1462,7 +1475,7 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
     for key in ["prompt", "input_text"] {
         if let Some(value) = payload.get(key) {
             if let Some(text) = extract_text_value(value) {
-                push_segment(&mut segments, &text);
+                push_owned_segment(&mut segments, text);
             }
         }
     }

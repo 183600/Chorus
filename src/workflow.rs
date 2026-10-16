@@ -3,6 +3,7 @@ use crate::llm::{parse_temperature_from_response, LLMClient, RetryPolicy};
 use anyhow::{anyhow, Result};
 use async_recursion::async_recursion;
 use futures::stream::{self, StreamExt as _};
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -31,10 +32,10 @@ impl LlmClientCacheKey {
 
 pub type StreamCallback = mpsc::UnboundedSender<String>;
 
-struct SelectedChoice {
+struct SelectedChoice<'a> {
     index: usize,
-    worker_name: String,
-    response: String,
+    worker_name: &'a str,
+    response: &'a str,
     reasoning: Option<String>,
 }
 
@@ -66,6 +67,11 @@ pub struct WorkflowExecutionDetails {
 /// used to: f32 temperatures appear in their widened f64 form
 /// (`1.4` -> `1.399999976158142`). The typed `/v1` responses and the streaming
 /// chunks historically emitted that representation, so it is preserved here.
+///
+/// The details are serialized directly instead of being materialized into an
+/// intermediate `serde_json::Value`, which avoids cloning every string in the
+/// payload. The field order matches the alphabetical order the intermediate
+/// `serde_json::Map` (a `BTreeMap` by default) used to produce.
 pub fn serialize_workflow_widened<S>(
     workflow: &Option<WorkflowExecutionDetails>,
     serializer: S,
@@ -73,9 +79,10 @@ pub fn serialize_workflow_widened<S>(
 where
     S: Serializer,
 {
-    serde_json::to_value(workflow)
-        .map_err(serde::ser::Error::custom)?
-        .serialize(serializer)
+    match workflow {
+        Some(details) => serializer.serialize_some(&WidenedWorkflowRef(details)),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Borrowed variant of [`serialize_workflow_widened`] for streaming chunks.
@@ -86,9 +93,136 @@ pub fn serialize_borrowed_workflow_widened<S>(
 where
     S: Serializer,
 {
-    serde_json::to_value(workflow)
-        .map_err(serde::ser::Error::custom)?
-        .serialize(serializer)
+    match workflow {
+        Some(details) => serializer.serialize_some(&WidenedWorkflowRef(details)),
+        None => serializer.serialize_none(),
+    }
+}
+
+struct WidenedWorkflowRef<'a>(&'a WorkflowExecutionDetails);
+
+impl Serialize for WidenedWorkflowRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let details = self.0;
+        let mut state = serializer.serialize_struct("WorkflowExecutionDetails", 4)?;
+        state.serialize_field("analyzer", &WidenedAnalyzerRef(&details.analyzer))?;
+        if let Some(selector) = details.selector.as_ref() {
+            state.serialize_field("selector", &WidenedSelectorRef(selector))?;
+        }
+        if let Some(synthesizer) = details.synthesizer.as_ref() {
+            state.serialize_field("synthesizer", &WidenedSynthesizerRef(synthesizer))?;
+        }
+        state.serialize_field("workers", &WidenedWorkersRef(&details.workers))?;
+        state.end()
+    }
+}
+
+struct WidenedWorkersRef<'a>(&'a [WorkerDetails]);
+
+impl Serialize for WidenedWorkersRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for worker in self.0 {
+            seq.serialize_element(&WidenedWorkerRef(worker))?;
+        }
+        seq.end()
+    }
+}
+
+struct WidenedAnalyzerRef<'a>(&'a AnalyzerDetails);
+
+impl Serialize for WidenedAnalyzerRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let analyzer = self.0;
+        let mut state = serializer.serialize_struct("AnalyzerDetails", 3)?;
+        state.serialize_field("auto_temperature", &analyzer.auto_temperature)?;
+        state.serialize_field("model", &analyzer.model)?;
+        state.serialize_field("temperature", &f64::from(analyzer.temperature))?;
+        state.end()
+    }
+}
+
+struct WidenedWorkerRef<'a>(&'a WorkerDetails);
+
+impl Serialize for WidenedWorkerRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let worker = self.0;
+        let mut state = serializer.serialize_struct("WorkerDetails", 6)?;
+        state.serialize_field("error", &worker.error)?;
+        state.serialize_field("name", &worker.name)?;
+        state.serialize_field(
+            "nested",
+            &worker.nested.as_deref().map(WidenedWorkflowRef),
+        )?;
+        state.serialize_field("response", &worker.response)?;
+        state.serialize_field("success", &worker.success)?;
+        state.serialize_field("temperature", &worker.temperature.map(f64::from))?;
+        state.end()
+    }
+}
+
+struct WidenedSelectorRef<'a>(&'a SelectorDetails);
+
+impl Serialize for WidenedSelectorRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let selector = self.0;
+        let mut state = serializer.serialize_struct("SelectorDetails", 9)?;
+        if let Some(error) = selector.error.as_ref() {
+            state.serialize_field("error", error)?;
+        }
+        state.serialize_field("model", &selector.model)?;
+        if let Some(raw_output) = selector.raw_output.as_ref() {
+            state.serialize_field("raw_output", raw_output)?;
+        }
+        if let Some(reasoning) = selector.reasoning.as_ref() {
+            state.serialize_field("reasoning", reasoning)?;
+        }
+        if let Some(selected_index) = selector.selected_index.as_ref() {
+            state.serialize_field("selected_index", selected_index)?;
+        }
+        if let Some(selected_response) = selector.selected_response.as_ref() {
+            state.serialize_field("selected_response", selected_response)?;
+        }
+        if let Some(selected_worker) = selector.selected_worker.as_ref() {
+            state.serialize_field("selected_worker", selected_worker)?;
+        }
+        state.serialize_field("success", &selector.success)?;
+        state.serialize_field("temperature", &f64::from(selector.temperature))?;
+        state.end()
+    }
+}
+
+struct WidenedSynthesizerRef<'a>(&'a SynthesizerDetails);
+
+impl Serialize for WidenedSynthesizerRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let synthesizer = self.0;
+        let mut state = serializer.serialize_struct("SynthesizerDetails", 3)?;
+        if let Some(error) = synthesizer.error.as_ref() {
+            state.serialize_field("error", error)?;
+        }
+        state.serialize_field("model", &synthesizer.model)?;
+        state.serialize_field("temperature", &f64::from(synthesizer.temperature))?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,7 +603,7 @@ impl WorkflowEngine {
         plan: &WorkflowPlan,
         worker_details: &[WorkerDetails],
         selector_details: Option<&SelectorDetails>,
-        selected_choice: Option<&SelectedChoice>,
+        selected_choice: Option<&SelectedChoice<'_>>,
         depth: usize,
     ) -> Result<String> {
         let _ = self;
@@ -506,7 +640,7 @@ impl WorkflowEngine {
                         "Selector chose worker response; using it as final output"
                     );
                 }
-                return Ok(choice.response.clone());
+                return Ok(choice.response.to_string());
             }
 
             tracing::warn!(
@@ -888,7 +1022,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                     Ok(result) => {
                         tracing::debug!("Nested workflow {} succeeded at depth {}", label, depth);
                         WorkerDetails {
-                            name: label.clone(),
+                            name: label,
                             temperature: None,
                             response: Some(result.final_response),
                             success: true,
@@ -960,13 +1094,13 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         Ok(response)
     }
 
-    async fn execute_selector(
+    async fn execute_selector<'a>(
         &self,
         target: &WorkflowModelTarget,
         original_prompt: &str,
-        worker_responses: &[(&str, &str)],
+        worker_responses: &'a [(&'a str, &'a str)],
         depth: usize,
-    ) -> (SelectorDetails, Option<SelectedChoice>) {
+    ) -> (SelectorDetails, Option<SelectedChoice<'a>>) {
         if worker_responses.is_empty() {
             tracing::warn!(
                 selector = %target.model,
@@ -1122,12 +1256,12 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         match parse_selector_choice(&raw_output, worker_responses.len()) {
             Ok(parsed) => {
                 let worker_entry = &worker_responses[parsed.index - 1];
-                let worker_name = worker_entry.0.to_string();
-                let worker_response = worker_entry.1.to_string();
+                let worker_name = worker_entry.0;
+                let worker_response = worker_entry.1;
                 let reasoning = parsed.reasoning;
                 let selected_response = parsed
                     .selected_response
-                    .unwrap_or_else(|| worker_response.clone());
+                    .unwrap_or_else(|| worker_response.to_string());
 
                 if depth == 0 {
                     tracing::info!(
@@ -1150,7 +1284,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
                     model: target.model.clone(),
                     temperature,
                     selected_index: Some(parsed.index),
-                    selected_worker: Some(worker_name.clone()),
+                    selected_worker: Some(worker_name.to_string()),
                     selected_response: Some(selected_response),
                     reasoning: reasoning.clone(),
                     success: true,
@@ -1198,7 +1332,7 @@ Temperature越低（接近0），输出越确定和保守；temperature越高（
         target: &WorkflowModelTarget,
         original_prompt: &str,
         worker_responses: &[(&str, &str)],
-        selected_choice: Option<&SelectedChoice>,
+        selected_choice: Option<&SelectedChoice<'_>>,
         depth: usize,
         stream: Option<StreamCallback>,
     ) -> std::result::Result<(String, bool), SynthesizerFailure> {
@@ -1691,6 +1825,108 @@ mod tests {
                 retry: RetryConfig::default(),
             },
         }
+    }
+
+    fn widened_details_tree() -> WorkflowExecutionDetails {
+        WorkflowExecutionDetails {
+            analyzer: AnalyzerDetails {
+                model: "analyzer".to_string(),
+                temperature: 1.4,
+                auto_temperature: true,
+            },
+            workers: vec![
+                WorkerDetails {
+                    name: "worker-a".to_string(),
+                    temperature: Some(0.3),
+                    response: Some("first\nresponse".to_string()),
+                    success: true,
+                    error: None,
+                    nested: None,
+                },
+                WorkerDetails {
+                    name: "workflow:b".to_string(),
+                    temperature: None,
+                    response: None,
+                    success: false,
+                    error: Some("boom".to_string()),
+                    nested: Some(Box::new(WorkflowExecutionDetails {
+                        analyzer: AnalyzerDetails {
+                            model: "nested".to_string(),
+                            temperature: 2.0,
+                            auto_temperature: false,
+                        },
+                        workers: vec![WorkerDetails {
+                            name: "nested-worker".to_string(),
+                            temperature: Some(1.25),
+                            response: Some("nested response".to_string()),
+                            success: true,
+                            error: None,
+                            nested: None,
+                        }],
+                        selector: None,
+                        synthesizer: None,
+                    })),
+                },
+            ],
+            selector: Some(SelectorDetails {
+                model: "selector".to_string(),
+                temperature: 0.7,
+                selected_index: Some(1),
+                selected_worker: Some("worker-a".to_string()),
+                selected_response: Some("picked answer".to_string()),
+                reasoning: Some("best".to_string()),
+                success: true,
+                error: None,
+                raw_output: Some("{\"selected_index\":1}".to_string()),
+            }),
+            synthesizer: Some(SynthesizerDetails {
+                model: "synth".to_string(),
+                temperature: 0.5,
+                error: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn widened_serialization_matches_value_roundtrip() {
+        let details = widened_details_tree();
+
+        let expected = serde_json::to_string(&serde_json::to_value(&Some(details.clone())).unwrap())
+            .expect("value serialization");
+        let mut buffer = Vec::new();
+        serialize_workflow_widened(
+            &Some(details.clone()),
+            &mut serde_json::Serializer::new(&mut buffer),
+        )
+        .expect("widened serialization");
+        assert_eq!(
+            String::from_utf8(buffer).expect("utf8"),
+            expected,
+            "widened owned serialization must match the serde_json::Value round trip"
+        );
+
+        let borrowed = Some(&details);
+        let expected = serde_json::to_string(&serde_json::to_value(&borrowed).unwrap())
+            .expect("value serialization");
+        let mut buffer = Vec::new();
+        serialize_borrowed_workflow_widened(
+            &borrowed,
+            &mut serde_json::Serializer::new(&mut buffer),
+        )
+        .expect("borrowed widened serialization");
+        assert_eq!(
+            String::from_utf8(buffer).expect("utf8"),
+            expected,
+            "borrowed widened serialization must match the serde_json::Value round trip"
+        );
+
+        let mut buffer = Vec::new();
+        serialize_workflow_widened(
+            &None::<WorkflowExecutionDetails>,
+            &mut serde_json::Serializer::new(&mut buffer),
+        )
+        .expect("null widened serialization");
+        assert_eq!(String::from_utf8(buffer).expect("utf8"), "null");
     }
 
     #[test]

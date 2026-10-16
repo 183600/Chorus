@@ -498,6 +498,7 @@ impl LLMClient {
         let mut buffer = String::new();
         let mut pending = Vec::new();
         let mut cursor = 0usize;
+        let mut scanned = 0usize;
         let mut data_payload = String::new();
         let mut byte_stream = response.bytes_stream();
 
@@ -520,12 +521,19 @@ impl LLMClient {
             }
 
             loop {
-                let Some((idx, sep_len)) = find_event_separator(&buffer[cursor..]) else {
+                let Some((idx, sep_len)) = find_event_separator(&buffer.as_bytes()[scanned..])
+                else {
+                    // A separator can span at most four bytes, so the last three
+                    // bytes are the only ones that need to be scanned again once
+                    // more data arrives.
+                    scanned = buffer.len().saturating_sub(3).max(cursor);
                     break;
                 };
 
-                let event = &buffer[cursor..cursor + idx];
-                cursor += idx + sep_len;
+                let separator_start = scanned + idx;
+                let event = &buffer[cursor..separator_start];
+                cursor = separator_start + sep_len;
+                scanned = cursor;
 
                 if event.trim().is_empty() {
                     continue;
@@ -629,6 +637,7 @@ impl LLMClient {
             if cursor > 0 {
                 buffer.drain(..cursor);
                 cursor = 0;
+                scanned = 0;
             }
         }
 
@@ -888,8 +897,8 @@ fn single_data_payload(event: &str) -> Option<&str> {
     found
 }
 
-fn find_event_separator(buffer: &str) -> Option<(usize, usize)> {
-    let bytes = buffer.as_bytes();
+fn find_event_separator(bytes: impl AsRef<[u8]>) -> Option<(usize, usize)> {
+    let bytes = bytes.as_ref();
 
     for index in 0..bytes.len() {
         match bytes[index] {
