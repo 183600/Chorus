@@ -261,7 +261,7 @@ impl WorkflowEngine {
 
     fn effective_timeouts_for_api_base(&self, api_base: &str) -> crate::config::TimeoutConfig {
         match self.api_timeouts.get(api_base) {
-            Some(timeouts) => timeouts.clone(),
+            Some(timeouts) => *timeouts,
             None => Self::resolve_timeouts(&self.config, api_base),
         }
     }
@@ -329,16 +329,14 @@ impl WorkflowEngine {
             );
         }
 
-        let worker_responses: Vec<(&str, &str)> = worker_details
-            .iter()
-            .filter_map(|w| {
-                if w.success {
-                    w.response.as_deref().map(|r| (w.name.as_str(), r))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut worker_responses: Vec<(&str, &str)> = Vec::with_capacity(worker_details.len());
+        worker_responses.extend(worker_details.iter().filter_map(|w| {
+            if w.success {
+                w.response.as_deref().map(|r| (w.name.as_str(), r))
+            } else {
+                None
+            }
+        }));
 
         let (selector_details, selected_choice) =
             if let Some(selector_target) = plan.selector.as_ref() {
@@ -1576,56 +1574,61 @@ fn value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Array(items) => {
-            let mut parts = Vec::new();
+            let mut joined: Option<String> = None;
             for item in items {
                 if let Some(text) = value_to_string(item) {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        parts.push(trimmed.to_string());
+                        match joined.as_mut() {
+                            Some(existing) => {
+                                existing.push(' ');
+                                existing.push_str(trimmed);
+                            }
+                            None => joined = Some(trimmed.to_string()),
+                        }
                     }
                 }
             }
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join(" "))
-            }
+            joined
         }
         serde_json::Value::Object(_) => None,
     }
 }
 
 fn find_first_index_in_text(text: &str, worker_count: usize) -> Option<usize> {
-    let mut current = String::new();
+    let mut value: usize = 0;
+    let mut has_digits = false;
 
-    for ch in text.chars() {
-        if ch.is_ascii_digit() {
-            current.push(ch);
+    for byte in text.bytes() {
+        if byte.is_ascii_digit() {
+            has_digits = true;
+            value = value
+                .saturating_mul(10)
+                .saturating_add((byte - b'0') as usize);
         } else {
-            if let Some(index) = parse_candidate_index(&current, worker_count) {
-                return Some(index);
+            if has_digits {
+                if let Some(index) = checked_candidate_index(value, worker_count) {
+                    return Some(index);
+                }
             }
-            current.clear();
+            value = 0;
+            has_digits = false;
         }
     }
 
-    if let Some(index) = parse_candidate_index(&current, worker_count) {
-        return Some(index);
+    if has_digits {
+        return checked_candidate_index(value, worker_count);
     }
 
     None
 }
 
-fn parse_candidate_index(fragment: &str, worker_count: usize) -> Option<usize> {
-    if fragment.is_empty() {
-        return None;
+fn checked_candidate_index(value: usize, worker_count: usize) -> Option<usize> {
+    if value >= 1 && value <= worker_count {
+        Some(value)
+    } else {
+        None
     }
-    if let Ok(value) = fragment.parse::<usize>() {
-        if value >= 1 && value <= worker_count {
-            return Some(value);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

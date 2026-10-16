@@ -171,7 +171,7 @@ impl Default for RetryPolicy {
 pub struct LLMClient {
     client: Client,
     api_base: String,
-    authorization: String,
+    authorization: reqwest::header::HeaderValue,
     chat_completions_url: String,
     retry: RetryPolicy,
     timeout: Duration,
@@ -195,10 +195,13 @@ impl LLMClient {
         let chat_completions_url =
             format!("{}/chat/completions", api_base.trim_end_matches('/'));
 
+        let authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
+            .with_context(|| format!("Invalid API key for {}", api_base))?;
+
         Ok(Self {
             client,
             api_base,
-            authorization: format!("Bearer {}", api_key),
+            authorization,
             chat_completions_url,
             retry,
             timeout: Duration::from_secs(timeout_secs),
@@ -335,8 +338,11 @@ impl LLMClient {
             let response = match self
                 .client
                 .post(&self.chat_completions_url)
-                .header("Authorization", &self.authorization)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::AUTHORIZATION, self.authorization.clone())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    reqwest::header::HeaderValue::from_static("application/json"),
+                )
                 .timeout(timeout)
                 .body(body.clone())
                 .send()
@@ -398,9 +404,8 @@ impl LLMClient {
                 }
             }
 
-            // Be tolerant to different provider response shapes
-            let v: serde_json::Value = match response.json().await {
-                Ok(value) => value,
+            let body = match response.bytes().await {
+                Ok(bytes) => bytes,
                 Err(err) => {
                     if self.can_retry(attempt) && is_retryable_reqwest_error(&err) {
                         self.wait_before_retry(attempt, None, model, &err.to_string())
@@ -408,6 +413,31 @@ impl LLMClient {
                         continue;
                     }
                     return Err(err.into());
+                }
+            };
+
+            // Fast path: the common OpenAI-compatible shape is parsed with a
+            // borrowed view so no `Value` tree is built. Any other shape is
+            // deferred to the tolerant `Value`-based path below.
+            if let Ok(text) = std::str::from_utf8(&body) {
+                if let Some(content) = fast_completion_text(text) {
+                    if let Some(sender) = stream.as_ref() {
+                        let _ = sender.send(content.clone());
+                    }
+                    return Ok(CompletionResult {
+                        content,
+                        streamed: stream_was_requested,
+                    });
+                }
+            }
+
+            // Be tolerant to different provider response shapes
+            let v: serde_json::Value = match serde_json::from_slice(&body) {
+                Ok(value) => value,
+                Err(err) => {
+                    // Mirrors the message reqwest's `Response::json` produced
+                    // before the body was read through `bytes()`.
+                    return Err(anyhow!("error decoding response body: {}", err).into());
                 }
             };
 
@@ -618,33 +648,35 @@ impl LLMClient {
 #[derive(Deserialize)]
 struct FastStreamChunk<'a> {
     #[serde(default, borrow)]
-    choices: Option<FirstStreamChoice<'a>>,
+    choices: Option<FirstChoice<FastStreamChoice<'a>>>,
 }
 
-struct FirstStreamChoice<'a>(FastStreamChoice<'a>);
+/// Deserializes only the first element of a choices sequence, skipping the
+/// remaining ones without allocating.
+struct FirstChoice<T>(T);
 
-impl<'de: 'a, 'a> Deserialize<'de> for FirstStreamChoice<'a> {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for FirstChoice<T> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        struct FirstChoiceVisitor<'a>(std::marker::PhantomData<&'a ()>);
+        struct FirstChoiceVisitor<T>(std::marker::PhantomData<T>);
 
-        impl<'de: 'a, 'a> serde::de::Visitor<'de> for FirstChoiceVisitor<'a> {
-            type Value = FirstStreamChoice<'a>;
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for FirstChoiceVisitor<T> {
+            type Value = FirstChoice<T>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a sequence of stream choices")
+                formatter.write_str("a sequence of choices")
             }
 
             fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
             where
                 A: serde::de::SeqAccess<'de>,
             {
-                let first = seq.next_element::<FastStreamChoice<'a>>()?;
+                let first = seq.next_element::<T>()?;
                 while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
                 first
-                    .map(FirstStreamChoice)
+                    .map(FirstChoice)
                     .ok_or_else(|| serde::de::Error::custom("empty choices sequence"))
             }
         }
@@ -717,6 +749,63 @@ fn fast_stream_event(payload: &str) -> FastStreamEvent<'_> {
         .filter(|reason| !reason.is_empty() && *reason != "null");
 
     FastStreamEvent::Text { text, finish }
+}
+
+/// Common non-streaming OpenAI-compatible completion shape.
+///
+/// Only used to skip building a `serde_json::Value` tree for the common case;
+/// every shape that is not recognized falls back to the tolerant
+/// `extract_completion_text` path, so this must only ever return a value that
+/// the generic path would also return.
+#[derive(Deserialize)]
+struct FastCompletionBody<'a> {
+    #[serde(default, borrow)]
+    choices: Option<FirstChoice<FastCompletionChoice<'a>>>,
+    #[serde(default, borrow)]
+    output_text: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct FastCompletionChoice<'a> {
+    #[serde(default)]
+    message: Option<FastCompletionMessage<'a>>,
+    #[serde(default)]
+    text: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct FastCompletionMessage<'a> {
+    #[serde(default)]
+    content: Option<&'a str>,
+    #[serde(default)]
+    reasoning_content: Option<&'a str>,
+    #[serde(default)]
+    reasoning: Option<&'a str>,
+}
+
+fn fast_completion_text(payload: &str) -> Option<String> {
+    let parsed: FastCompletionBody<'_> = serde_json::from_str(payload).ok()?;
+
+    if let Some(choice) = parsed.choices.as_ref().map(|choices| &choices.0) {
+        if let Some(message) = choice.message.as_ref() {
+            if let Some(content) = non_empty_str(message.content)
+                .or_else(|| non_empty_str(message.reasoning_content))
+                .or_else(|| non_empty_str(message.reasoning))
+            {
+                return Some(content.to_string());
+            }
+        }
+
+        if let Some(text) = choice.text.map(str::trim).filter(|text| !text.is_empty()) {
+            return Some(text.to_string());
+        }
+    }
+
+    if let Some(text) = non_empty_str(parsed.output_text) {
+        return Some(text.to_string());
+    }
+
+    None
 }
 
 fn response_is_event_stream(response: &reqwest::Response) -> bool {
@@ -1144,20 +1233,22 @@ fn json_value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Array(items) => {
-            let mut parts = Vec::new();
+            let mut joined: Option<String> = None;
             for item in items {
                 if let Some(text) = json_value_to_string(item) {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        parts.push(trimmed.to_string());
+                        match joined.as_mut() {
+                            Some(existing) => {
+                                existing.push(' ');
+                                existing.push_str(trimmed);
+                            }
+                            None => joined = Some(trimmed.to_string()),
+                        }
                     }
                 }
             }
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join(" "))
-            }
+            joined
         }
         serde_json::Value::Object(map) => {
             for key in &[
@@ -1479,6 +1570,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fast_completion_text_never_diverges_from_value_path() {
+        let cases = [
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}"#,
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","content":""},"text":" tail "}]}"#,
+            r#"{"choices":[{"index":0,"message":{"content":"","reasoning_content":"think"}}]}"#,
+            r#"{"choices":[{"index":0,"message":{"reasoning":"why"}}]}"#,
+            r#"{"choices":[{"index":0,"text":" plain "}]}"#,
+            r#"{"output_text":"out"}"#,
+            r#"{"output_text":""}"#,
+            r#"{"choices":[]}"#,
+            r#"{"choices":[{"message":{"content":123}}]}"#,
+            r#"{"choices":[{"message":{"content":[{"text":"a"}]}}]}"#,
+            r#"{"choices":[{"message":{"content":""}}]}"#,
+            r#"{"choices":"nope"}"#,
+            r#"{"choices":[{"message":{"content":"x"}},{"message":{"content":"y"}}]}"#,
+            "not json at all",
+        ];
+
+        for case in cases {
+            let expected = serde_json::from_str::<serde_json::Value>(case)
+                .ok()
+                .and_then(|value| extract_completion_text(&value));
+            if let Some(fast) = fast_completion_text(case) {
+                assert_eq!(
+                    Some(fast),
+                    expected,
+                    "fast non-stream path diverged for {}",
+                    case
+                );
+            }
+        }
+
+        assert_eq!(
+            fast_completion_text(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}"#
+            )
+            .as_deref(),
+            Some("hello"),
+            "the common OpenAI shape must be served by the fast path"
+        );
     }
 
     #[test]

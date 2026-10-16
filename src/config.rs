@@ -648,7 +648,7 @@ impl RetryConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TimeoutConfig {
     pub analyzer_timeout_secs: u64,
     pub worker_timeout_secs: u64,
@@ -1000,6 +1000,6 @@ impl Config {
                 };
             }
         }
-        self.workflow.timeouts.clone()
+        self.workflow.timeouts
     }
 }

@@ -378,6 +378,137 @@ struct ResponsesResponse<'a> {
     workflow: Option<WorkflowExecutionDetails>,
 }
 
+/// Terminal payload for `/api/generate` and `/v1/generate` streams. Fields are
+/// declared in the same order serde_json previously emitted them for the
+/// `json!` macro so the wire format is byte-for-byte identical.
+#[derive(Serialize)]
+struct GenerateCompletionChunk<'a> {
+    created_at: &'a str,
+    done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<&'a WorkflowExecutionDetails>,
+}
+
+/// Terminal payload for `/api/chat` and `/v1/chat` streams.
+#[derive(Serialize)]
+struct ChatCompletionChunk<'a> {
+    created_at: &'a str,
+    done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    message: ChatStreamMessage<'a>,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<&'a WorkflowExecutionDetails>,
+}
+
+#[derive(Serialize)]
+struct OpenAiRoleDelta<'a> {
+    role: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenAiInitialChatChoice<'a> {
+    delta: OpenAiRoleDelta<'a>,
+    finish_reason: Option<()>,
+    index: u32,
+}
+
+#[derive(Serialize)]
+struct OpenAiInitialChatChunk<'a> {
+    choices: [OpenAiInitialChatChoice<'a>; 1],
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiEmptyDelta {}
+
+#[derive(Serialize)]
+struct OpenAiFinalChatChoice {
+    delta: OpenAiEmptyDelta,
+    finish_reason: &'static str,
+    index: u32,
+}
+
+/// Terminal payload for `/v1/chat/completions` streams.
+#[derive(Serialize)]
+struct OpenAiFinalChatChunk<'a> {
+    choices: [OpenAiFinalChatChoice; 1],
+    created: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<&'a WorkflowExecutionDetails>,
+}
+
+/// Terminal payload for `/v1/completions` streams.
+#[derive(Serialize)]
+struct OpenAiFinalCompletionChunk<'a> {
+    choices: [OpenAiCompletionChoice<'a>; 1],
+    created: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<&'a WorkflowExecutionDetails>,
+}
+
+#[derive(Serialize)]
+struct ResponsesInitialOutput<'a> {
+    content: [Value; 0],
+    id: &'a str,
+    role: &'static str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct ResponsesInitialChunk<'a> {
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    output: [ResponsesInitialOutput<'a>; 1],
+    output_text: &'static str,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct ResponsesCompletedChunk<'a> {
+    created: i64,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    output: [ResponsesOutputMessage<'a>; 1],
+    output_text: &'a str,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow: Option<&'a WorkflowExecutionDetails>,
+}
+
+#[derive(Serialize)]
+struct ResponsesErrorChunk<'a> {
+    created: i64,
+    error: &'a str,
+    id: &'a str,
+    model: &'a str,
+    object: &'static str,
+    status: &'static str,
+}
+
 async fn execute_workflow(
     state: &AppState,
     prompt: String,
@@ -432,19 +563,6 @@ fn spawn_streaming_workflow(
     });
 
     (chunk_rx, result_rx)
-}
-
-fn insert_workflow_field(
-    payload: &mut serde_json::Value,
-    details: &Option<WorkflowExecutionDetails>,
-) {
-    if let Some(details) = details {
-        if let serde_json::Value::Object(map) = payload {
-            if let Ok(value) = serde_json::to_value(details) {
-                map.insert("workflow".to_string(), value);
-            }
-        }
-    }
 }
 
 pub async fn start_server(config: Arc<Config>) -> Result<()> {
@@ -646,32 +764,37 @@ async fn generate(
             async move {
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
-                        let mut payload = serde_json::json!({
-                            "model": model_name,
-                            "created_at": created_at,
-                            "response": "",
-                            "done": true,
-                        });
-                        insert_workflow_field(&mut payload, &workflow_details);
+                        let payload = GenerateCompletionChunk {
+                            created_at: &created_at,
+                            done: true,
+                            error: None,
+                            model: &model_name,
+                            response: Some(""),
+                            workflow: workflow_details.as_ref(),
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Ok(Err(err)) => {
                         let error_message = err.error.to_string();
-                        let payload = serde_json::json!({
-                            "model": model_name,
-                            "created_at": created_at,
-                            "done": true,
-                            "error": error_message,
-                        });
+                        let payload = GenerateCompletionChunk {
+                            created_at: &created_at,
+                            done: true,
+                            error: Some(&error_message),
+                            model: &model_name,
+                            response: None,
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Err(_) => {
-                        let payload = serde_json::json!({
-                            "model": model_name,
-                            "created_at": created_at,
-                            "done": true,
-                            "error": "stream cancelled",
-                        });
+                        let payload = GenerateCompletionChunk {
+                            created_at: &created_at,
+                            done: true,
+                            error: Some("stream cancelled"),
+                            model: &model_name,
+                            response: None,
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                 }
@@ -746,43 +869,46 @@ async fn chat(
             async move {
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
-                        let mut payload = serde_json::json!({
-                            "model": model_name,
-                            "created_at": created_at,
-                            "message": {
-                                "role": "assistant",
-                                "content": "",
+                        let payload = ChatCompletionChunk {
+                            created_at: &created_at,
+                            done: true,
+                            error: None,
+                            message: ChatStreamMessage {
+                                content: "",
+                                role: "assistant",
                             },
-                            "done": true,
-                        });
-                        insert_workflow_field(&mut payload, &workflow_details);
+                            model: &model_name,
+                            workflow: workflow_details.as_ref(),
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Ok(Err(err)) => {
                         let error_message = err.error.to_string();
-                        let payload = serde_json::json!({
-                            "model": model_name,
-                            "created_at": created_at,
-                            "message": {
-                                "role": "assistant",
-                                "content": "",
+                        let payload = ChatCompletionChunk {
+                            created_at: &created_at,
+                            done: true,
+                            error: Some(&error_message),
+                            message: ChatStreamMessage {
+                                content: "",
+                                role: "assistant",
                             },
-                            "done": true,
-                            "error": error_message,
-                        });
+                            model: &model_name,
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Err(_) => {
-                        let payload = serde_json::json!({
-                            "model": model_name,
-                            "created_at": created_at,
-                            "message": {
-                                "role": "assistant",
-                                "content": "",
+                        let payload = ChatCompletionChunk {
+                            created_at: &created_at,
+                            done: true,
+                            error: Some("stream cancelled"),
+                            message: ChatStreamMessage {
+                                content: "",
+                                role: "assistant",
                             },
-                            "done": true,
-                            "error": "stream cancelled",
-                        });
+                            model: &model_name,
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                 }
@@ -837,17 +963,17 @@ async fn openai_chat_completions(
             let id = id.clone();
             let model_name = model_name.clone();
             async move {
-                let payload = serde_json::json!({
-                    "id": id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [ {
-                        "index": 0,
-                        "delta": { "role": "assistant" },
-                        "finish_reason": serde_json::Value::Null
-                    } ],
-                });
+                let payload = OpenAiInitialChatChunk {
+                    choices: [OpenAiInitialChatChoice {
+                        delta: OpenAiRoleDelta { role: "assistant" },
+                        finish_reason: None,
+                        index: 0,
+                    }],
+                    created,
+                    id: &id,
+                    model: &model_name,
+                    object: "chat.completion.chunk",
+                };
                 Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
             }
         });
@@ -881,51 +1007,49 @@ async fn openai_chat_completions(
             let id = id.clone();
             let model_name = model_name.clone();
             async move {
+                let choices = |finish_reason: &'static str| {
+                    [OpenAiFinalChatChoice {
+                        delta: OpenAiEmptyDelta {},
+                        finish_reason,
+                        index: 0,
+                    }]
+                };
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
-                        let mut payload = serde_json::json!({
-                            "id": id.clone(),
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [ {
-                                "index": 0,
-                                "delta": serde_json::json!({}),
-                                "finish_reason": "stop"
-                            } ]
-                        });
-                        insert_workflow_field(&mut payload, &workflow_details);
+                        let payload = OpenAiFinalChatChunk {
+                            choices: choices("stop"),
+                            created,
+                            error: None,
+                            id: &id,
+                            model: &model_name,
+                            object: "chat.completion.chunk",
+                            workflow: workflow_details.as_ref(),
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Ok(Err(err)) => {
                         let error_message = err.error.to_string();
-                        let payload = serde_json::json!({
-                            "id": id.clone(),
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [ {
-                                "index": 0,
-                                "delta": serde_json::json!({}),
-                                "finish_reason": "error"
-                            } ],
-                            "error": error_message,
-                        });
+                        let payload = OpenAiFinalChatChunk {
+                            choices: choices("error"),
+                            created,
+                            error: Some(&error_message),
+                            id: &id,
+                            model: &model_name,
+                            object: "chat.completion.chunk",
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Err(_) => {
-                        let payload = serde_json::json!({
-                            "id": id.clone(),
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [ {
-                                "index": 0,
-                                "delta": serde_json::json!({}),
-                                "finish_reason": "error"
-                            } ],
-                            "error": "stream cancelled",
-                        });
+                        let payload = OpenAiFinalChatChunk {
+                            choices: choices("error"),
+                            created,
+                            error: Some("stream cancelled"),
+                            id: &id,
+                            model: &model_name,
+                            object: "chat.completion.chunk",
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                 }
@@ -1019,54 +1143,50 @@ async fn openai_completions(
             let id = id.clone();
             let model_name = model_name.clone();
             async move {
+                let choices = |finish_reason: &'static str| {
+                    [OpenAiCompletionChoice {
+                        finish_reason: Some(finish_reason),
+                        index: 0,
+                        logprobs: None,
+                        text: "",
+                    }]
+                };
                 match result_rx.await {
                     Ok(Ok((_, workflow_details))) => {
-                        let mut payload = serde_json::json!({
-                            "id": id.clone(),
-                            "object": "text_completion",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [ {
-                                "text": "",
-                                "index": 0,
-                                "logprobs": serde_json::Value::Null,
-                                "finish_reason": "stop"
-                            } ]
-                        });
-                        insert_workflow_field(&mut payload, &workflow_details);
+                        let payload = OpenAiFinalCompletionChunk {
+                            choices: choices("stop"),
+                            created,
+                            error: None,
+                            id: &id,
+                            model: &model_name,
+                            object: "text_completion",
+                            workflow: workflow_details.as_ref(),
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Ok(Err(err)) => {
                         let error_message = err.error.to_string();
-                        let payload = serde_json::json!({
-                            "id": id.clone(),
-                            "object": "text_completion",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [ {
-                                "text": "",
-                                "index": 0,
-                                "logprobs": serde_json::Value::Null,
-                                "finish_reason": "error"
-                            } ],
-                            "error": error_message,
-                        });
+                        let payload = OpenAiFinalCompletionChunk {
+                            choices: choices("error"),
+                            created,
+                            error: Some(&error_message),
+                            id: &id,
+                            model: &model_name,
+                            object: "text_completion",
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                     Err(_) => {
-                        let payload = serde_json::json!({
-                            "id": id.clone(),
-                            "object": "text_completion",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [ {
-                                "text": "",
-                                "index": 0,
-                                "logprobs": serde_json::Value::Null,
-                                "finish_reason": "error"
-                            } ],
-                            "error": "stream cancelled",
-                        });
+                        let payload = OpenAiFinalCompletionChunk {
+                            choices: choices("error"),
+                            created,
+                            error: Some("stream cancelled"),
+                            id: &id,
+                            model: &model_name,
+                            object: "text_completion",
+                            workflow: None,
+                        };
                         Ok::<Event, Infallible>(Event::default().json_data(payload).unwrap())
                     }
                 }
@@ -1118,19 +1238,21 @@ fn extract_text_value(value: &Value) -> Option<String> {
             }
         }
         Value::Array(items) => {
-            let mut parts = Vec::new();
+            let mut joined: Option<String> = None;
             for item in items {
                 if let Some(text) = extract_text_value(item) {
                     if !text.is_empty() {
-                        parts.push(text);
+                        match joined.as_mut() {
+                            Some(existing) => {
+                                existing.push('\n');
+                                existing.push_str(&text);
+                            }
+                            None => joined = Some(text),
+                        }
                     }
                 }
             }
-            if parts.is_empty() {
-                None
-            } else {
-                Some(parts.join("\n"))
-            }
+            joined
         }
         Value::Object(map) => {
             for key in ["text", "input_text", "value", "output_text"] {
@@ -1193,23 +1315,34 @@ fn extract_message_text(value: &Value) -> Option<String> {
 }
 
 fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
-    let mut segments: Vec<String> = Vec::new();
+    fn push_segment(segments: &mut Option<String>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match segments.as_mut() {
+            Some(joined) => {
+                joined.push('\n');
+                joined.push_str(text);
+            }
+            None => *segments = Some(text.to_string()),
+        }
+    }
+
+    let mut segments: Option<String> = None;
 
     if let Some(Value::String(instr)) = payload.get("instructions") {
         let trimmed = instr.trim();
         if !trimmed.is_empty() {
-            segments.push(format!("system: {}", trimmed));
+            push_segment(&mut segments, &format!("system: {}", trimmed));
         }
     }
 
     if let Some(Value::Array(messages)) = payload.get("messages") {
         for msg in messages {
             if let Some(text) = extract_message_text(msg) {
-                segments.push(text);
+                push_segment(&mut segments, &text);
             } else if let Some(text) = extract_text_value(msg) {
-                if !text.is_empty() {
-                    segments.push(text);
-                }
+                push_segment(&mut segments, &text);
             }
         }
     }
@@ -1217,29 +1350,22 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
     if let Some(input) = payload.get("input") {
         match input {
             Value::String(s) => {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    segments.push(trimmed.to_string());
-                }
+                push_segment(&mut segments, s.trim());
             }
             Value::Array(items) => {
                 for item in items {
                     if let Some(text) = extract_message_text(item) {
-                        segments.push(text);
+                        push_segment(&mut segments, &text);
                     } else if let Some(text) = extract_text_value(item) {
-                        if !text.is_empty() {
-                            segments.push(text);
-                        }
+                        push_segment(&mut segments, &text);
                     }
                 }
             }
             Value::Object(_) => {
                 if let Some(text) = extract_message_text(input) {
-                    segments.push(text);
+                    push_segment(&mut segments, &text);
                 } else if let Some(text) = extract_text_value(input) {
-                    if !text.is_empty() {
-                        segments.push(text);
-                    }
+                    push_segment(&mut segments, &text);
                 }
             }
             _ => {}
@@ -1249,18 +1375,12 @@ fn extract_prompt_from_responses_body(payload: &Value) -> Option<String> {
     for key in ["prompt", "input_text"] {
         if let Some(value) = payload.get(key) {
             if let Some(text) = extract_text_value(value) {
-                if !text.is_empty() {
-                    segments.push(text);
-                }
+                push_segment(&mut segments, &text);
             }
         }
     }
 
-    if segments.is_empty() {
-        None
-    } else {
-        Some(segments.join("\n"))
-    }
+    segments
 }
 
 async fn responses(
@@ -1312,20 +1432,20 @@ async fn responses(
             let model_name = model_name.clone();
             let created = created;
             async move {
-                let payload = serde_json::json!({
-                    "id": resp_id,
-                    "object": "response",
-                    "created": created,
-                    "model": model_name,
-                    "status": "in_progress",
-                    "output": [ {
-                        "id": msg_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "content": Vec::<serde_json::Value>::new()
-                    } ],
-                    "output_text": "",
-                });
+                let payload = ResponsesInitialChunk {
+                    created,
+                    id: &resp_id,
+                    model: &model_name,
+                    object: "response",
+                    output: [ResponsesInitialOutput {
+                        content: [],
+                        id: &msg_id,
+                        role: "assistant",
+                        kind: "message",
+                    }],
+                    output_text: "",
+                    status: "in_progress",
+                };
                 Ok::<Event, Infallible>(
                     Event::default()
                         .event("response.created")
@@ -1381,21 +1501,24 @@ async fn responses(
                             prompt_len,
                             response_text.len()
                         );
-                        let mut payload = serde_json::json!({
-                            "id": resp_id,
-                            "object": "response",
-                            "created": created,
-                            "model": model_name,
-                            "status": "completed",
-                            "output": [ {
-                                "id": msg_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [ { "type": "output_text", "text": response_text } ]
-                            } ],
-                            "output_text": response_text,
-                        });
-                        insert_workflow_field(&mut payload, &workflow_details);
+                        let payload = ResponsesCompletedChunk {
+                            created,
+                            id: &resp_id,
+                            model: &model_name,
+                            object: "response",
+                            output: [ResponsesOutputMessage {
+                                id: &msg_id,
+                                kind: "message",
+                                role: "assistant",
+                                content: [ResponsesOutputContent {
+                                    kind: "output_text",
+                                    text: &response_text,
+                                }],
+                            }],
+                            output_text: &response_text,
+                            status: "completed",
+                            workflow: workflow_details.as_ref(),
+                        };
                         Ok::<Event, Infallible>(
                             Event::default()
                                 .event("response.completed")
@@ -1410,14 +1533,14 @@ async fn responses(
                             prompt_len,
                             error_message
                         );
-                        let payload = serde_json::json!({
-                            "id": resp_id,
-                            "object": "response.error",
-                            "created": created,
-                            "model": model_name,
-                            "status": "failed",
-                            "error": error_message,
-                        });
+                        let payload = ResponsesErrorChunk {
+                            created,
+                            error: &error_message,
+                            id: &resp_id,
+                            model: &model_name,
+                            object: "response.error",
+                            status: "failed",
+                        };
                         Ok::<Event, Infallible>(
                             Event::default()
                                 .event("response.error")
@@ -1430,14 +1553,14 @@ async fn responses(
                             "Responses stream cancelled before completion (prompt {} bytes)",
                             prompt_len
                         );
-                        let payload = serde_json::json!({
-                            "id": resp_id,
-                            "object": "response.error",
-                            "created": created,
-                            "model": model_name,
-                            "status": "failed",
-                            "error": "stream cancelled",
-                        });
+                        let payload = ResponsesErrorChunk {
+                            created,
+                            error: "stream cancelled",
+                            id: &resp_id,
+                            model: &model_name,
+                            object: "response.error",
+                            status: "failed",
+                        };
                         Ok::<Event, Infallible>(
                             Event::default()
                                 .event("response.error")
@@ -2051,6 +2174,257 @@ mod stream_payload_tests {
             serde_json::to_value(with_workflow).unwrap(),
             serde_json::to_value(&legacy).unwrap()
         );
+    }
+
+    #[test]
+    fn stream_completion_payloads_match_legacy_json_macro_output() {
+        let details = WorkflowExecutionDetails {
+            analyzer: crate::workflow::AnalyzerDetails {
+                model: "m".to_string(),
+                temperature: 1.0,
+                auto_temperature: false,
+            },
+            workers: Vec::new(),
+            selector: None,
+            synthesizer: None,
+        };
+        let mut legacy = serde_json::json!({
+            "model": "m",
+            "created_at": "t",
+            "response": "",
+            "done": true,
+        });
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("workflow".to_string(), serde_json::to_value(&details).unwrap());
+        let generate = GenerateCompletionChunk {
+            created_at: "t",
+            done: true,
+            error: None,
+            model: "m",
+            response: Some(""),
+            workflow: Some(&details),
+        };
+        assert_eq!(serde_json::to_value(&generate).unwrap(), legacy);
+
+        let generate_error = GenerateCompletionChunk {
+            created_at: "t",
+            done: true,
+            error: Some("boom"),
+            model: "m",
+            response: None,
+            workflow: None,
+        };
+        let legacy = serde_json::json!({
+            "model": "m",
+            "created_at": "t",
+            "done": true,
+            "error": "boom",
+        });
+        assert_eq!(serde_json::to_value(&generate_error).unwrap(), legacy);
+
+        let chat = ChatCompletionChunk {
+            created_at: "t",
+            done: true,
+            error: None,
+            message: ChatStreamMessage {
+                content: "",
+                role: "assistant",
+            },
+            model: "m",
+            workflow: Some(&details),
+        };
+        let mut legacy = serde_json::json!({
+            "model": "m",
+            "created_at": "t",
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+        });
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("workflow".to_string(), serde_json::to_value(&details).unwrap());
+        assert_eq!(serde_json::to_value(&chat).unwrap(), legacy);
+
+        let initial = OpenAiInitialChatChunk {
+            choices: [OpenAiInitialChatChoice {
+                delta: OpenAiRoleDelta { role: "assistant" },
+                finish_reason: None,
+                index: 0,
+            }],
+            created: 7,
+            id: "id",
+            model: "m",
+            object: "chat.completion.chunk",
+        };
+        let legacy = serde_json::json!({
+            "id": "id",
+            "object": "chat.completion.chunk",
+            "created": 7,
+            "model": "m",
+            "choices": [ {
+                "index": 0,
+                "delta": { "role": "assistant" },
+                "finish_reason": serde_json::Value::Null
+            } ],
+        });
+        assert_eq!(serde_json::to_value(&initial).unwrap(), legacy);
+
+        let final_chat = OpenAiFinalChatChunk {
+            choices: [OpenAiFinalChatChoice {
+                delta: OpenAiEmptyDelta {},
+                finish_reason: "stop",
+                index: 0,
+            }],
+            created: 7,
+            error: None,
+            id: "id",
+            model: "m",
+            object: "chat.completion.chunk",
+            workflow: Some(&details),
+        };
+        let mut legacy = serde_json::json!({
+            "id": "id",
+            "object": "chat.completion.chunk",
+            "created": 7,
+            "model": "m",
+            "choices": [ {
+                "index": 0,
+                "delta": serde_json::json!({}),
+                "finish_reason": "stop"
+            } ]
+        });
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("workflow".to_string(), serde_json::to_value(&details).unwrap());
+        assert_eq!(serde_json::to_value(&final_chat).unwrap(), legacy);
+
+        let final_completion = OpenAiFinalCompletionChunk {
+            choices: [OpenAiCompletionChoice {
+                finish_reason: Some("stop"),
+                index: 0,
+                logprobs: None,
+                text: "",
+            }],
+            created: 7,
+            error: None,
+            id: "id",
+            model: "m",
+            object: "text_completion",
+            workflow: Some(&details),
+        };
+        let mut legacy = serde_json::json!({
+            "id": "id",
+            "object": "text_completion",
+            "created": 7,
+            "model": "m",
+            "choices": [ {
+                "text": "",
+                "index": 0,
+                "logprobs": serde_json::Value::Null,
+                "finish_reason": "stop"
+            } ]
+        });
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("workflow".to_string(), serde_json::to_value(&details).unwrap());
+        assert_eq!(serde_json::to_value(&final_completion).unwrap(), legacy);
+
+        let responses_initial = ResponsesInitialChunk {
+            created: 7,
+            id: "resp_1",
+            model: "m",
+            object: "response",
+            output: [ResponsesInitialOutput {
+                content: [],
+                id: "msg_1",
+                role: "assistant",
+                kind: "message",
+            }],
+            output_text: "",
+            status: "in_progress",
+        };
+        let legacy = serde_json::json!({
+            "id": "resp_1",
+            "object": "response",
+            "created": 7,
+            "model": "m",
+            "status": "in_progress",
+            "output": [ {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": Vec::<serde_json::Value>::new()
+            } ],
+            "output_text": "",
+        });
+        assert_eq!(
+            serde_json::to_value(&responses_initial).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
+
+        let response_text = "done".to_string();
+        let responses_completed = ResponsesCompletedChunk {
+            created: 7,
+            id: "resp_1",
+            model: "m",
+            object: "response",
+            output: [ResponsesOutputMessage {
+                id: "msg_1",
+                kind: "message",
+                role: "assistant",
+                content: [ResponsesOutputContent {
+                    kind: "output_text",
+                    text: &response_text,
+                }],
+            }],
+            output_text: &response_text,
+            status: "completed",
+            workflow: Some(&details),
+        };
+        let mut legacy = serde_json::json!({
+            "id": "resp_1",
+            "object": "response",
+            "created": 7,
+            "model": "m",
+            "status": "completed",
+            "output": [ {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [ { "type": "output_text", "text": "done" } ]
+            } ],
+            "output_text": "done",
+        });
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("workflow".to_string(), serde_json::to_value(&details).unwrap());
+        assert_eq!(
+            serde_json::to_value(&responses_completed).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
+
+        let responses_error = ResponsesErrorChunk {
+            created: 7,
+            error: "boom",
+            id: "resp_1",
+            model: "m",
+            object: "response.error",
+            status: "failed",
+        };
+        let legacy = serde_json::json!({
+            "id": "resp_1",
+            "object": "response.error",
+            "created": 7,
+            "model": "m",
+            "status": "failed",
+            "error": "boom",
+        });
+        assert_eq!(serde_json::to_value(&responses_error).unwrap(), legacy);
     }
 }
 
